@@ -1,0 +1,29 @@
+{
+  "invoice_fields": [
+    "invoice_number",
+    "invoice_date",
+    "supplier_name",
+    "buyer_name",
+    "supplier_gstin"
+  ],
+  "invoice_table_fields": [
+    "item_description",
+    "hsn_code",
+    "quantity",
+    "unit_price",
+    "taxable_value",
+    "tax_amount",
+    "total_value"
+  ],
+  "challan_fields": [
+    "challan_number",
+    "challan_date",
+    "party_name"
+  ],
+  "challan_table_fields": [
+    "fabric_name",
+    "fd_number",
+    "piece_number",
+    "dispatch_mtr"
+  ]
+}
