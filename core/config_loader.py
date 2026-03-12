@@ -1,9 +1,11 @@
 """
 Load and save extraction field settings from config/settings.json.
-Used by the Settings window and by the document processor / prompt builder.
+Uses paths module for bundle vs writable location when frozen.
 """
 import json
 import os
+
+from . import paths as _paths
 
 # Default field keys (all enabled). Must match options in settings UI.
 DEFAULT_CONFIG = {
@@ -48,14 +50,17 @@ DEFAULT_CONFIG = {
 }
 
 
-def get_config_path(base_dir: str) -> str:
-    """Return path to config/settings.json under base_dir."""
-    return os.path.join(base_dir, "config", "settings.json")
+def get_config_path(base_dir: str = None) -> str:
+    """Return path to config/settings.json. When frozen uses paths; else base_dir."""
+    if _paths.is_frozen():
+        return _paths.get_settings_path(for_read=True)
+    base = base_dir or _paths.get_resource_base()
+    return os.path.join(base, "config", "settings.json")
 
 
-def load_config(base_dir: str) -> dict:
+def load_config(base_dir: str = None) -> dict:
     """
-    Load settings from config/settings.json.
+    Load settings from config/settings.json (writable or bundled when frozen).
     Returns DEFAULT_CONFIG if file is missing or invalid.
     """
     path = get_config_path(base_dir)
@@ -64,7 +69,6 @@ def load_config(base_dir: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Ensure all keys exist
         for key in DEFAULT_CONFIG:
             if key not in data or not isinstance(data[key], list):
                 data[key] = list(DEFAULT_CONFIG[key])
@@ -73,9 +77,14 @@ def load_config(base_dir: str) -> dict:
         return DEFAULT_CONFIG.copy()
 
 
-def save_config(base_dir: str, config: dict) -> None:
-    """Save settings to config/settings.json. Creates config dir if needed."""
-    path = get_config_path(base_dir)
+def save_config(base_dir: str = None, config: dict = None) -> None:
+    """Save settings to config/settings.json (writable location when frozen)."""
+    if config is None:
+        return
+    if _paths.is_frozen():
+        path = os.path.join(_paths.get_config_dir(writable=True), "settings.json")
+    else:
+        path = os.path.join(base_dir or _paths.get_resource_base(), "config", "settings.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)

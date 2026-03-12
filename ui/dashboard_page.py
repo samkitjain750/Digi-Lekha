@@ -17,8 +17,9 @@ class DashboardPage(ctk.CTkFrame):
     def __init__(self, parent, base_dir: str, **kwargs):
         super().__init__(parent, fg_color=WORKSPACE_BG, **kwargs)
         self.base_dir = base_dir
-        self.input_var = ctk.StringVar(value=os.path.join(base_dir, "input_docs"))
-        self.output_var = ctk.StringVar(value=os.path.join(base_dir, "output"))
+        # Start with empty paths on first load; user chooses folders explicitly.
+        self.input_var = ctk.StringVar(value="")
+        self.output_var = ctk.StringVar(value="")
         self.on_start = None
         self.on_open_output = None
         self.btn_start = None
@@ -49,6 +50,7 @@ class DashboardPage(ctk.CTkFrame):
         ctk.CTkLabel(row2, text="Output Folder", width=120, anchor="w").pack(side="left", padx=(0, 10))
         ctk.CTkEntry(row2, textvariable=self.output_var, height=36, corner_radius=8).pack(side="left", fill="x", expand=True, padx=5)
         ctk.CTkButton(row2, text="Browse", width=100, corner_radius=8, command=lambda: self._browse(self.output_var)).pack(side="left")
+        ctk.CTkLabel(card_inner, text="Tip: Add files by opening the input folder in Finder/Explorer and dragging files in.", font=ctk.CTkFont(size=11), text_color="#64748B").pack(anchor="w", pady=(6, 0))
 
         btn_row = ctk.CTkFrame(card_inner, fg_color="transparent")
         btn_row.pack(fill="x", pady=16)

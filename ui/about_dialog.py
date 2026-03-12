@@ -48,7 +48,7 @@ class AboutDialog(ctk.CTkToplevel):
         # App name
         ctk.CTkLabel(
             inner,
-            text="AI Document Extractor",
+            text="Digi Lekha",
             font=ctk.CTkFont(size=20, weight="bold"),
             text_color=("gray10", "gray90"),
         ).pack(pady=(0, 8))

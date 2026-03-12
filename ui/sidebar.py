@@ -39,7 +39,7 @@ class Sidebar(ctk.CTkFrame):
         title_frame.pack(fill="x", padx=16, pady=20)
         ctk.CTkLabel(
             title_frame,
-            text="AI Document\nExtractor",
+            text="Digi Lekha",
             font=ctk.CTkFont(size=16, weight="bold"),
             anchor="w",
             justify="left",

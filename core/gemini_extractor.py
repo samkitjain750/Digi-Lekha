@@ -15,31 +15,54 @@ except ImportError:
     Image = None
     genai = None
 
+from . import paths as _paths
+
 # Gemini model name (update if deprecated)
 GEMINI_MODEL = "gemini-2.5-flash"
 
 
-def get_gemini_api_key(app_base_dir: str) -> str:
+def get_gemini_api_key(app_base_dir: str = None) -> str:
     """
-    Get Gemini API key from environment or from .env in app directory.
+    Get Gemini API key from (1) env GEMINI_API_KEY, (2) .env in app dir, (3) config/api_key.json.
+    app_base_dir: used for .env lookup when not frozen; ignored for api_key.json (uses paths).
     Returns empty string if not set.
     """
     key = os.environ.get("GEMINI_API_KEY", "").strip()
     if key:
         return key
-    env_path = os.path.join(app_base_dir, ".env")
-    if os.path.isfile(env_path):
+    if app_base_dir:
+        env_path = os.path.join(app_base_dir, ".env")
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("GEMINI_API_KEY="):
+                            key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            if key:
+                                return key
+                            break
+            except Exception:
+                pass
+    api_key_path = _paths.get_api_key_path()
+    if os.path.isfile(api_key_path):
         try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("GEMINI_API_KEY="):
-                        key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        return key or ""
-                        break
+            with open(api_key_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                key = (data.get("api_key") or data.get("GEMINI_API_KEY") or "").strip()
+                if key:
+                    return key
         except Exception:
             pass
     return ""
+
+
+def save_gemini_api_key(api_key: str) -> None:
+    """Store API key in config/api_key.json (writable app data when frozen)."""
+    path = _paths.get_api_key_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"api_key": api_key.strip()}, f, indent=2)
 
 
 def build_extraction_prompt(config: dict) -> str:

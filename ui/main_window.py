@@ -17,6 +17,7 @@ _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
+from core import paths as _paths
 from core.config_loader import load_config
 from core.document_processor import process_documents
 from ui.sidebar import Sidebar
@@ -51,7 +52,7 @@ class MainWindow:
     """Three-section app: Sidebar | Workspace (pages) | RightPanel."""
 
     def __init__(self):
-        self.base_dir = _APP_ROOT if not getattr(sys, "frozen", False) else os.path.dirname(sys.executable)
+        self.base_dir = _paths.get_writable_base() if _paths.is_frozen() else _APP_ROOT
         self.config = load_config(self.base_dir)
         self.is_processing = False
         self.progress_total = 0
@@ -65,7 +66,7 @@ class MainWindow:
         ctk.set_default_color_theme("blue")
 
         self.root = ctk.CTk()
-        self.root.title("AI Document Extractor")
+        self.root.title("Digi Lekha")
         self.root.geometry("1200x720")
         self.root.minsize(900, 600)
         self.root.configure(fg_color=WORKSPACE_BG)
