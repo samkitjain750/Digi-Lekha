@@ -7,45 +7,14 @@ import os
 
 from . import paths as _paths
 
-# Default field keys (all enabled). Must match options in settings UI.
+# Default config: delivery challan only, with piece and dispatch meters.
 DEFAULT_CONFIG = {
-    "invoice_fields": [
-        "invoice_number",
-        "invoice_date",
-        "supplier_name",
-        "supplier_gstin",
-        "buyer_name",
-        "buyer_gstin",
-        "total_tax",
-        "total_invoice_value",
-    ],
-    "invoice_table_fields": [
-        "item_description",
-        "hsn_code",
-        "quantity",
-        "uom",
-        "unit_price",
-        "discount",
-        "taxable_value",
-        "gst_rate",
-        "tax_amount",
-        "total_value",
-    ],
-    "challan_fields": [
-        "challan_number",
-        "challan_date",
-        "party_name",
-        "hsn_code",
-    ],
+    "invoice_fields": [],
+    "invoice_table_fields": [],
+    "challan_fields": [],
     "challan_table_fields": [
-        "fabric_name",
-        "fd_number",
         "piece_number",
-        "challan_mtr",
         "dispatch_mtr",
-        "grey_received_date",
-        "grey_challan_number",
-        "beam",
     ],
 }
 

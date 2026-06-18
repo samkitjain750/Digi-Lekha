@@ -20,25 +20,11 @@ BG_CARD = "#FFFFFF"
 DOC_COLUMNS = [
     "file_name",
     "document_type",
-    "invoice_number",
-    "invoice_date",
-    "supplier_name",
-    "supplier_gstin",
-    "buyer_name",
-    "challan_number",
-    "challan_date",
-    "party_name",
 ]
 
 ITEM_COLUMNS = [
-    "file_name",
-    "item_description",
-    "hsn_code",
-    "quantity",
-    "unit_price",
-    "taxable_value",
-    "tax_amount",
-    "total_value",
+    "Piece No",
+    "Finished Mtrs",
 ]
 
 # Default min width for columns (chars)
@@ -82,6 +68,32 @@ def _auto_resize_columns(tree: ttk.Treeview, columns: list):
             tree.column(col, width=min(max(w, 70), 450), minwidth=70)
         except Exception:
             tree.column(col, width=100, minwidth=70)
+
+
+def _latest_excel_file(root_dir: str) -> str:
+    """Return most recent challan .xlsx file under root_dir (recursive)."""
+    if not root_dir or not os.path.isdir(root_dir):
+        return ""
+    latest = ""
+    latest_mtime = -1.0
+    challan_latest = ""
+    challan_mtime = -1.0
+    for dirpath, _, filenames in os.walk(root_dir):
+        for name in filenames:
+            if not name.lower().endswith(".xlsx"):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                mtime = os.path.getmtime(path)
+                if mtime > latest_mtime:
+                    latest = path
+                    latest_mtime = mtime
+                if "delivery_challan" in name.lower() and mtime > challan_mtime:
+                    challan_latest = path
+                    challan_mtime = mtime
+            except Exception:
+                pass
+    return challan_latest or latest
 
 
 class ResultsPage(ctk.CTkFrame):
@@ -186,9 +198,9 @@ class ResultsPage(ctk.CTkFrame):
 
         if not self.output_dir:
             return
-        xlsx = os.path.join(self.output_dir, "extracted_data.xlsx")
-        if not os.path.isfile(xlsx):
-            self._show_placeholders("No extracted_data.xlsx found. Run processing first.")
+        xlsx = _latest_excel_file(self.output_dir)
+        if not xlsx:
+            self._show_placeholders("No Excel output found. Run processing first.")
             return
 
         self._hide_placeholders()
@@ -242,7 +254,11 @@ class ResultsPage(ctk.CTkFrame):
 
         # Line Items: insert row by row
         for _, row in df_items.iterrows():
-            values = [str(row.get(c, "")) for c in ITEM_COLUMNS]
+            # Support both new export headers and older internal names.
+            values = [
+                str(row.get("Piece No", row.get("piece_number", ""))),
+                str(row.get("Finished Mtrs", row.get("dispatch_mtr", ""))),
+            ]
             self._items_tree.insert("", tk.END, values=values)
 
         _auto_resize_columns(self._doc_tree, DOC_COLUMNS)

@@ -67,52 +67,47 @@ def save_gemini_api_key(api_key: str) -> None:
 
 def build_extraction_prompt(config: dict) -> str:
     """
-    Build the system prompt for Gemini using only the fields enabled in config.
-    config keys: invoice_fields, invoice_table_fields, challan_fields, challan_table_fields
-    (each is a list of field names).
+    Build OCR prompt supporting both delivery challans and invoices.
     """
-    inv_h = config.get("invoice_fields") or []
-    inv_t = config.get("invoice_table_fields") or []
-    ch_h = config.get("challan_fields") or []
-    ch_t = config.get("challan_table_fields") or []
+    return """You are an OCR extraction and validation engine for textile challans/invoices.
 
-    inv_header_str = ", ".join(inv_h) if inv_h else "(none)"
-    inv_table_str = ", ".join(inv_t) if inv_t else "(none)"
-    ch_header_str = ", ".join(ch_h) if ch_h else "(none)"
-    ch_table_str = ", ".join(ch_t) if ch_t else "(none)"
+Identify document type first:
+- delivery_challan
+- invoice
 
-    return f"""You are an expert OCR document parser.
+Always return ONLY valid JSON object (no markdown/no explanation):
+{
+  "document_type": "delivery_challan" or "invoice",
+  "header": {},
+  "items": []
+}
 
-You will receive a scanned business document image. The document will be one of:
-- Tax Invoice
-- Job Delivery Challan
+For DELIVERY CHALLAN:
+- Extract row-wise:
+  piece_no, grey_mtrs, finished_mtrs, shrinkage_percent, flag, reason
+- Alias mapping:
+  finished_mtrs <- Finished Mtrs/Finished Mtr/Dispatch Mtr/Dispatch Mtrs/Final Mtrs/Net Mtrs
+  grey_mtrs <- Grey Mtrs/Grey Mtr/Grey
+  piece_no <- Piece No/Invoice No/Lot No/Roll No
+- Rules:
+  1) finished_mtrs < grey_mtrs
+  2) shrinkage_percent = ((grey_mtrs - finished_mtrs)/grey_mtrs)*100
+  3) normal shrinkage range 2%-10%, outside => flag true
+  4) unclear text or column shift => flag true
+  5) confusion I/J, O/0, S/5, B/8 => flag true
 
-STEP 1 — IDENTIFY DOCUMENT TYPE
-Return exactly: "invoice" or "delivery_challan"
+For INVOICE:
+- Extract header fields when visible:
+  supplier_name, supplier_gstin, bill_to, bill_to_gstin, invoice_number, invoice_date,
+  challan_number, ewb_no, ack_no, irn, state_code
+- Extract these table fields row-wise when visible:
+  quality, finished_mtrs, rate, and amount (line total / Amount column if printed; else empty string)
+- Alias mapping for finished_mtrs same as above.
+- amount <- Amount/Value/Total/Line Amount when present.
+- If a row value is unclear, set flag true and add reason.
 
-STEP 2 — EXTRACT HEADER INFORMATION
-If the document is an INVOICE extract only these fields: {inv_header_str}
-If the document is a DELIVERY CHALLAN extract only these fields: {ch_header_str}
-
-STEP 3 — EXTRACT TABLE ROWS
-If the document is an INVOICE extract for each row only: {inv_table_str}
-If the document is a DELIVERY CHALLAN extract for each row only: {ch_table_str}
-
-STEP 4 — OUTPUT FORMAT
-Return ONLY valid JSON. No explanations, no markdown.
-{{
-  "document_type": "invoice" or "delivery_challan",
-  "header": {{ }},
-  "items": [ {{ }} ]
-}}
-
-RULES
-- Extract values exactly as written. Use empty string "" if missing.
-- Numbers stay numbers when possible.
-- One object per table row in "items".
-- Ignore signatures, stamps, handwritten marks.
-- For invoice line items: total_value = taxable_value + tax_amount when both present. Use 2 decimal places for money.
-- Return clean JSON only. No code fences."""
+Keep decimals as printed. Use empty string for missing values.
+"""
 
 
 def extract_from_images(
@@ -168,7 +163,65 @@ def parse_extraction_response(text: str, file_name: str, logs_dir: str = "") -> 
         json_str = text.split("```")[1].split("```")[0].strip()
 
     try:
-        return json.loads(json_str)
+        parsed = json.loads(json_str)
+        # Support legacy strict challan prompt that returns a JSON array of rows.
+        if isinstance(parsed, list):
+            items = []
+            for row in parsed:
+                if not isinstance(row, dict):
+                    continue
+                items.append(
+                    {
+                        "piece_number": row.get("piece_no", ""),
+                        "dispatch_mtr": row.get("finished_mtrs", ""),
+                        "grey_mtrs": row.get("grey_mtrs", ""),
+                        "shrinkage_percent": row.get("shrinkage_percent", ""),
+                        "flag": row.get("flag", False),
+                        "reason": row.get("reason", ""),
+                    }
+                )
+            return {
+                "document_type": "delivery_challan",
+                "header": {},
+                "items": items,
+            }
+        # Normalize invoice items from aliases
+        if isinstance(parsed, dict) and str(parsed.get("document_type", "")).strip().lower().startswith("invoice"):
+            items = parsed.get("items", []) or []
+            norm_items = []
+            for row in items:
+                if not isinstance(row, dict):
+                    continue
+                norm_items.append(
+                    {
+                        "quality": row.get("quality", row.get("item_description", "")),
+                        "finished_mtrs": row.get("finished_mtrs", row.get("fin_mtrs", row.get("dispatch_mtr", ""))),
+                        "rate": row.get("rate", row.get("unit_price", "")),
+                        "amount": row.get("amount", row.get("Amount", row.get("line_amount", ""))),
+                        "flag": row.get("flag", False),
+                        "reason": row.get("reason", ""),
+                    }
+                )
+            parsed["items"] = norm_items
+        # Normalize challan items from Gemini field names (piece_no, finished_mtrs)
+        elif isinstance(parsed, dict) and "challan" in str(parsed.get("document_type", "")).strip().lower():
+            items = parsed.get("items", []) or []
+            norm_items = []
+            for row in items:
+                if not isinstance(row, dict):
+                    continue
+                norm_items.append(
+                    {
+                        "piece_number": row.get("piece_number", row.get("piece_no", "")),
+                        "dispatch_mtr": row.get("dispatch_mtr", row.get("finished_mtrs", row.get("fin_mtrs", ""))),
+                        "grey_mtrs": row.get("grey_mtrs", ""),
+                        "shrinkage_percent": row.get("shrinkage_percent", ""),
+                        "flag": row.get("flag", False),
+                        "reason": row.get("reason", ""),
+                    }
+                )
+            parsed["items"] = norm_items
+        return parsed
     except json.JSONDecodeError as e:
         if logs_dir:
             try:

@@ -15,36 +15,9 @@ from core.config_loader import load_config, save_config, DEFAULT_CONFIG
 WORKSPACE_BG = "#F8FAFC"
 BG_CARD = "#FFFFFF"
 
-# Field key -> label (subset matching user spec)
-INVOICE_FIELDS = {
-    "invoice_number": "Invoice Number",
-    "invoice_date": "Invoice Date",
-    "supplier_name": "Supplier Name",
-    "buyer_name": "Buyer Name",
-    "supplier_gstin": "GST Number",
-    "total_tax": "Total Tax",
-    "total_invoice_value": "Total Invoice Value",
-}
-INVOICE_TABLE_FIELDS = {
-    "item_description": "Item Description",
-    "hsn_code": "HSN Code",
-    "quantity": "Quantity",
-    "unit_price": "Unit Price",
-    "taxable_value": "Taxable Value",
-    "tax_amount": "Tax Amount",
-    "total_value": "Total Value",
-}
-CHALLAN_FIELDS = {
-    "challan_number": "Challan Number",
-    "challan_date": "Challan Date",
-    "party_name": "Party Name",
-}
 CHALLAN_TABLE_FIELDS = {
-    "fabric_name": "Fabric Name",
-    "fd_number": "FD Number",
-    "piece_number": "Piece Number",
-    "dispatch_mtr": "Dispatch MTR",
-    "beam": "Beam",
+    "piece_number": "Piece No",
+    "dispatch_mtr": "Finished Mtrs (Dispatch Mtr)",
 }
 
 
@@ -57,7 +30,9 @@ class SettingsPage(ctk.CTkFrame):
         self.config = load_config(base_dir)
         self.on_save = None
         self._switches = {}
+        self._save_after_id = None
         self._build()
+        self.bind("<Destroy>", self._on_destroy, add="+")
 
     def _build(self):
         inner = ctk.CTkScrollableFrame(self, fg_color="transparent")
@@ -77,9 +52,6 @@ class SettingsPage(ctk.CTkFrame):
                 sw.pack(anchor="w", pady=4)
                 self._switches[(config_key, key)] = var
 
-        add_section("Invoice fields", INVOICE_FIELDS, "invoice_fields")
-        add_section("Invoice table fields", INVOICE_TABLE_FIELDS, "invoice_table_fields")
-        add_section("Delivery challan fields", CHALLAN_FIELDS, "challan_fields")
         add_section("Delivery challan table fields", CHALLAN_TABLE_FIELDS, "challan_table_fields")
 
         btn_row = ctk.CTkFrame(inner, fg_color="transparent")
@@ -100,11 +72,30 @@ class SettingsPage(ctk.CTkFrame):
             self.on_save(cfg)
         self.save_message.configure(text="Settings saved.")
         self.btn_save.configure(text="Saved!")
-        self.after(2500, self._reset_save_ui)
+        if self._save_after_id:
+            try:
+                self.after_cancel(self._save_after_id)
+            except Exception:
+                pass
+        self._save_after_id = self.after(2500, self._reset_save_ui)
 
     def _reset_save_ui(self):
+        self._save_after_id = None
+        if not self.winfo_exists():
+            return
         self.btn_save.configure(text="Save settings")
         self.save_message.configure(text="")
 
     def get_config(self):
         return self.config
+
+    def _on_destroy(self, event):
+        # Prevent pending after-callback from firing on a destroyed widget.
+        if event.widget is not self:
+            return
+        if self._save_after_id:
+            try:
+                self.after_cancel(self._save_after_id)
+            except Exception:
+                pass
+            self._save_after_id = None

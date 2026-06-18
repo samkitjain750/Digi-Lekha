@@ -9,7 +9,7 @@ from datetime import datetime
 
 from .image_preprocessor import preprocess_image, cleanup_temp_files
 from .gemini_extractor import extract_from_images, parse_extraction_response, get_gemini_api_key
-from .excel_writer import write_to_excel
+from .excel_writer import write_to_excel, write_invoice_to_excel
 
 
 def ensure_directories(input_dir: str, output_dir: str, base_dir: str) -> tuple[str, str]:
@@ -71,6 +71,17 @@ def process_documents(
         return
 
     processed_dir, logs_dir = ensure_directories(input_dir, output_dir, base_dir)
+    run_date = datetime.now().strftime("%Y-%m-%d")
+    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    challan_output_dir = os.path.join(output_dir, "delivery_challan", run_date)
+    invoice_output_dir = os.path.join(output_dir, "invoice", run_date)
+    os.makedirs(challan_output_dir, exist_ok=True)
+    os.makedirs(invoice_output_dir, exist_ok=True)
+    challan_output_file = os.path.join(challan_output_dir, f"delivery_challan_{run_stamp}.xlsx")
+    invoice_output_file = os.path.join(invoice_output_dir, f"invoice_{run_stamp}.xlsx")
+    if log_callback:
+        log_callback(f"Run challan output: {challan_output_file}")
+        log_callback(f"Run invoice output: {invoice_output_file}")
     files = load_supported_files(input_dir)
 
     if not files:
@@ -131,7 +142,11 @@ def process_documents(
         if log_callback:
             log_callback("Writing to Excel...")
         try:
-            write_to_excel(data, filename, output_dir, config)
+            doc_type = str(data.get("document_type", "")).strip().lower()
+            if "invoice" in doc_type:
+                write_invoice_to_excel(data, filename, output_file=invoice_output_file)
+            else:
+                write_to_excel(data, filename, output_dir, config, output_file=challan_output_file)
         except Exception as e:
             if log_callback:
                 log_callback(f"Excel writing error: {e}", True)

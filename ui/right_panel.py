@@ -45,8 +45,8 @@ class RightPanel(ctk.CTkFrame):
         if not name:
             return
 
-        # Load actual extracted data from Excel
-        xlsx = os.path.join(self.output_dir, "extracted_data.xlsx") if self.output_dir else ""
+        # Load actual extracted data from latest Excel output
+        xlsx = self._latest_excel_file(self.output_dir) if self.output_dir else ""
         if xlsx and os.path.isfile(xlsx):
             try:
                 import pandas as pd
@@ -95,3 +95,29 @@ class RightPanel(ctk.CTkFrame):
         self._current_data = None
         self.preview_label.configure(text="Select a document from the\nDocuments page.")
         self.fields_text.delete("0.0", "end")
+
+    @staticmethod
+    def _latest_excel_file(root_dir: str) -> str:
+        """Return most recent challan .xlsx file under root_dir (recursive)."""
+        if not root_dir or not os.path.isdir(root_dir):
+            return ""
+        latest = ""
+        latest_mtime = -1.0
+        challan_latest = ""
+        challan_mtime = -1.0
+        for dirpath, _, filenames in os.walk(root_dir):
+            for name in filenames:
+                if not name.lower().endswith(".xlsx"):
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    mtime = os.path.getmtime(path)
+                    if mtime > latest_mtime:
+                        latest = path
+                        latest_mtime = mtime
+                    if "delivery_challan" in name.lower() and mtime > challan_mtime:
+                        challan_latest = path
+                        challan_mtime = mtime
+                except Exception:
+                    pass
+        return challan_latest or latest

@@ -26,6 +26,7 @@ from ui.documents_page import DocumentsPage
 from ui.settings_page import SettingsPage
 from ui.logs_page import LogsPage
 from ui.results_page import ResultsPage
+from ui.invoice_results_page import InvoiceResultsPage
 from ui.right_panel import RightPanel
 from ui.about_dialog import AboutDialog
 
@@ -112,6 +113,10 @@ class MainWindow:
         self.results_page.on_export_click = lambda: _open_output_folder(self.dashboard.output_var.get())
         self.pages["results"] = self.results_page
 
+        self.invoice_results_page = InvoiceResultsPage(self.workspace)
+        self.invoice_results_page.on_export_click = lambda: _open_output_folder(self.dashboard.output_var.get())
+        self.pages["invoice_results"] = self.invoice_results_page
+
         # Right panel (Preview + Extracted fields) — shown only on Documents tab
         self.right_panel = RightPanel(self.root)
 
@@ -144,6 +149,17 @@ class MainWindow:
         if page_key == "results":
             self.results_page.set_output_dir(self.dashboard.output_var.get())
             self.results_page.load_preview()
+        if page_key == "invoice_results":
+            self.invoice_results_page.set_output_dir(self.dashboard.output_var.get())
+            self.invoice_results_page.load_preview()
+
+    def _refresh_output_previews(self):
+        """After a run, reload challan and invoice previews from the current dashboard output folder."""
+        od = self.dashboard.output_var.get().strip()
+        self.results_page.output_dir = od
+        self.results_page.load_preview()
+        self.invoice_results_page.output_dir = od
+        self.invoice_results_page.load_preview()
 
     def _on_select_document(self, path: str, data: dict):
         self.right_panel.set_output_dir(self.dashboard.output_var.get())
@@ -225,7 +241,7 @@ class MainWindow:
                     on_file_done=self._on_file_done,
                 )
                 self.root.after(0, lambda: messagebox.showinfo("Success", "Document processing completed!"))
-                self.root.after(0, self.results_page.load_preview)
+                self.root.after(0, self._refresh_output_previews)
             except Exception as e:
                 self._log(f"Critical error: {e}", is_error=True)
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))

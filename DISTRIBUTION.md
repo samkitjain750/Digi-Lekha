@@ -6,8 +6,31 @@ This document describes how to build and distribute the application as a standal
 
 - Python 3.10+ with dependencies installed (`pip install -r requirements.txt`)
 - **PyInstaller**: `pip install pyinstaller`
-- (Optional) App icons in `assets/icons/`: `app_icon.icns` (macOS), `app_icon.ico` (Windows).  
-  You can generate a basic `.ico` with: `python scripts/make_icons.py`
+- App icon: `assets/icons/app_icon.ico` (Windows) — run `python scripts/make_icons.py` if missing.
+- Optional macOS icon: `assets/icons/app_icon.icns`
+
+### Important: build on the target OS
+
+PyInstaller builds for the machine it runs on. You **cannot** create a Windows `.exe` on macOS (or vice versa) without a VM or CI.
+
+| Where you are | How to get Windows `.exe` |
+|---------------|---------------------------|
+| **Windows PC** | Run `build_win.bat` locally |
+| **macOS (you)** | Push to GitHub and run the **Build desktop apps** workflow (see below) |
+
+---
+
+## Building on GitHub (Windows + macOS)
+
+If the repo is on GitHub, use Actions to build both platforms without a Windows PC:
+
+1. Push this project to GitHub.
+2. Open **Actions** → **Build desktop apps** → **Run workflow**.
+3. When finished, download artifacts:
+   - **Digi-Lekha-Windows** → `Digi Lekha.exe`
+   - **Digi-Lekha-macOS** → `Digi-Lekha-macOS.zip`
+
+The workflow also runs automatically when you push a version tag like `v1.0.0`.
 
 ---
 

@@ -1,0 +1,71 @@
+name: Build desktop apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Generate app icon
+        run: python scripts/make_icons.py
+
+      - name: Build Windows exe
+        run: build_win.bat
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Digi-Lekha-Windows
+          path: dist/Digi Lekha.exe
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install -r requirements.txt pyinstaller
+
+      - name: Generate app icon
+        run: python3 scripts/make_icons.py
+
+      - name: Build macOS app
+        run: |
+          chmod +x build_mac.sh
+          ./build_mac.sh
+
+      - name: Zip macOS app
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "Digi Lekha.app" "Digi-Lekha-macOS.zip"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Digi-Lekha-macOS
+          path: dist/Digi-Lekha-macOS.zip
+          if-no-files-found: error
