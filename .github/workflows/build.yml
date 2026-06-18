@@ -27,6 +27,7 @@ jobs:
 
       - name: Build Windows exe
         run: build_win.bat
+        shell: cmd
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
