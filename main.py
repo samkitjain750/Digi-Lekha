@@ -16,7 +16,7 @@ except ImportError:
     ctk = None
 
 from core import paths as _paths
-from core.gemini_extractor import get_gemini_api_key, save_gemini_api_key
+from core.openai_extractor import get_openai_api_key, save_openai_api_key
 from ui.api_key_setup import ApiKeySetupDialog
 from ui.main_window import MainWindow
 
@@ -42,13 +42,13 @@ def main():
     # Hide root off-screen so dialog/main window can show (withdraw() can hide children on macOS .app)
     root.geometry("1x1+-10000+-10000")
     base = _paths.get_resource_base()
-    if not get_gemini_api_key(base):
+    if not get_openai_api_key(base):
         def on_saved(key: str):
-            save_gemini_api_key(key)
+            save_openai_api_key(key)
         dialog = ApiKeySetupDialog(root, on_saved=on_saved)
         root.after(100, lambda: _bring_to_front(dialog))
         dialog.wait_window()
-        if not get_gemini_api_key(base):
+        if not get_openai_api_key(base):
             root.destroy()
             return
     root.destroy()

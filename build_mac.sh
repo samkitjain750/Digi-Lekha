@@ -11,10 +11,15 @@ if ! python3 -m PyInstaller --help &>/dev/null; then
   exit 1
 fi
 
-if [[ ! -f "assets/icons/app_icon.ico" ]]; then
-  echo "Generating app icon..."
-  python3 scripts/make_icons.py
-fi
+echo "Generating app icons from logo..."
+python3 scripts/make_icons.py
 
 python3 -m PyInstaller DigiLekha.spec --noconfirm --clean
-echo "Done. App: dist/Digi Lekha.app"
+
+APP="dist/Digi Lekha.app"
+PLIST="$APP/Contents/Info.plist"
+# macOS expects CFBundleIconFile without the .icns extension
+/usr/libexec/PlistBuddy -c "Set :CFBundleIconFile app_icon" "$PLIST" 2>/dev/null || true
+touch "$APP"
+
+echo "Done. App: $APP"

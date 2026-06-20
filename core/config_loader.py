@@ -14,6 +14,7 @@ DEFAULT_CONFIG = {
     "challan_fields": [],
     "challan_table_fields": [
         "piece_number",
+        "grey_mtrs",
         "dispatch_mtr",
     ],
 }

@@ -1,33 +1,53 @@
 """
-Google Gemini Vision integration: API key resolution, dynamic prompt from settings,
-and document extraction (JSON response parsing).
+OpenAI Vision integration: API key resolution, extraction prompt, and JSON parsing.
 """
-import os
+import base64
 import json
+import os
 from datetime import datetime
 
 try:
-    import google.generativeai as genai
-    from PIL import Image
-    GEMINI_AVAILABLE = True
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
 except ImportError:
-    GEMINI_AVAILABLE = False
-    Image = None
-    genai = None
+    OPENAI_AVAILABLE = False
+    OpenAI = None
 
 from . import paths as _paths
 
-# Gemini model name (update if deprecated)
-GEMINI_MODEL = "gemini-2.5-flash"
+# Vision model for document OCR.
+# OpenAI has no gpt-5.5-mini; latest mini with image input is gpt-5.4-mini.
+# Override via OPENAI_MODEL in .env (e.g. gpt-5.5, gpt-5-mini, gpt-4o).
+DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
 
 
-def get_gemini_api_key(app_base_dir: str = None) -> str:
+def get_openai_model(app_base_dir: str = None) -> str:
+    model = os.environ.get("OPENAI_MODEL", "").strip()
+    if model:
+        return model
+    if app_base_dir:
+        env_path = os.path.join(app_base_dir, ".env")
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("OPENAI_MODEL="):
+                            model = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            if model:
+                                return model
+                            break
+            except Exception:
+                pass
+    return DEFAULT_OPENAI_MODEL
+
+
+def get_openai_api_key(app_base_dir: str = None) -> str:
     """
-    Get Gemini API key from (1) env GEMINI_API_KEY, (2) .env in app dir, (3) config/api_key.json.
-    app_base_dir: used for .env lookup when not frozen; ignored for api_key.json (uses paths).
+    Get OpenAI API key from (1) env OPENAI_API_KEY, (2) .env, (3) config/api_key.json.
     Returns empty string if not set.
     """
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
     if key:
         return key
     if app_base_dir:
@@ -37,7 +57,7 @@ def get_gemini_api_key(app_base_dir: str = None) -> str:
                 with open(env_path, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
-                        if line.startswith("GEMINI_API_KEY="):
+                        if line.startswith("OPENAI_API_KEY="):
                             key = line.split("=", 1)[1].strip().strip('"').strip("'")
                             if key:
                                 return key
@@ -49,7 +69,7 @@ def get_gemini_api_key(app_base_dir: str = None) -> str:
         try:
             with open(api_key_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                key = (data.get("api_key") or data.get("GEMINI_API_KEY") or "").strip()
+                key = (data.get("api_key") or data.get("OPENAI_API_KEY") or "").strip()
                 if key:
                     return key
         except Exception:
@@ -57,7 +77,7 @@ def get_gemini_api_key(app_base_dir: str = None) -> str:
     return ""
 
 
-def save_gemini_api_key(api_key: str) -> None:
+def save_openai_api_key(api_key: str) -> None:
     """Store API key in config/api_key.json (writable app data when frozen)."""
     path = _paths.get_api_key_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -66,9 +86,7 @@ def save_gemini_api_key(api_key: str) -> None:
 
 
 def build_extraction_prompt(config: dict) -> str:
-    """
-    Build OCR prompt supporting both delivery challans and invoices.
-    """
+    """Build OCR prompt supporting both delivery challans and invoices."""
     return """You are an OCR extraction and validation engine for textile challans/invoices.
 
 Identify document type first:
@@ -110,6 +128,24 @@ Keep decimals as printed. Use empty string for missing values.
 """
 
 
+def _image_mime(path: str) -> str:
+    ext = path.lower().rsplit(".", 1)[-1]
+    if ext in ("jpg", "jpeg"):
+        return "image/jpeg"
+    if ext == "png":
+        return "image/png"
+    if ext == "webp":
+        return "image/webp"
+    if ext == "gif":
+        return "image/gif"
+    return "image/jpeg"
+
+
+def _encode_image_b64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
 def extract_from_images(
     image_paths: list,
     config: dict,
@@ -117,44 +153,60 @@ def extract_from_images(
     log_callback=None,
 ) -> str | None:
     """
-    Send preprocessed image paths to Gemini and return the raw text response.
-    log_callback(message, is_error: bool) is optional for logging.
+    Send preprocessed image paths to OpenAI Vision and return the raw text response.
     Returns None on API/key/parse failure.
     """
-    if not GEMINI_AVAILABLE:
+    if not OPENAI_AVAILABLE:
         if log_callback:
-            log_callback("Google Generative AI not installed. Run: pip install google-generativeai", True)
+            log_callback("OpenAI SDK not installed. Run: pip install openai", True)
         return None
 
-    api_key = get_gemini_api_key(app_base_dir)
+    api_key = get_openai_api_key(app_base_dir)
     if not api_key:
         if log_callback:
-            log_callback("Gemini API Key required. Set GEMINI_API_KEY in env or .env file.", True)
+            log_callback("OpenAI API Key required. Set OPENAI_API_KEY in env or .env file.", True)
         return None
 
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        prompt = build_extraction_prompt(config) + "\n\nReturn ONLY valid JSON. No markdown, no explanation."
-        parts = [prompt]
-        for path in image_paths:
-            parts.append(Image.open(path))
-        response = model.generate_content(parts)
-        if not response or not response.text:
+    prompt = build_extraction_prompt(config) + "\n\nReturn ONLY valid JSON. No markdown, no explanation."
+    content = [{"type": "text", "text": prompt}]
+    for path in image_paths:
+        try:
+            b64 = _encode_image_b64(path)
+            mime = _image_mime(path)
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                }
+            )
+        except OSError as e:
             if log_callback:
-                log_callback("Gemini returned empty response.", True)
+                log_callback(f"Could not read image {path}: {e}", True)
             return None
-        return response.text.strip()
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=get_openai_model(app_base_dir),
+            messages=[{"role": "user", "content": content}],
+            max_completion_tokens=16384,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if not text:
+            if log_callback:
+                log_callback("OpenAI returned empty response.", True)
+            return None
+        return text
     except Exception as e:
         if log_callback:
-            log_callback(f"Gemini API Error: {e}", True)
+            log_callback(f"OpenAI API Error: {e}", True)
         return None
 
 
 def parse_extraction_response(text: str, file_name: str, logs_dir: str = "") -> dict | None:
     """
-    Parse Gemini's text response into a JSON object.
-    Strips markdown code fences if present. On failure logs to logs_dir/errors.txt and returns None.
+    Parse model text response into a JSON object.
+    Strips markdown code fences if present. On failure logs to logs_dir/errors.txt.
     """
     json_str = text
     if "```json" in text:
@@ -164,7 +216,6 @@ def parse_extraction_response(text: str, file_name: str, logs_dir: str = "") -> 
 
     try:
         parsed = json.loads(json_str)
-        # Support legacy strict challan prompt that returns a JSON array of rows.
         if isinstance(parsed, list):
             items = []
             for row in parsed:
@@ -185,7 +236,6 @@ def parse_extraction_response(text: str, file_name: str, logs_dir: str = "") -> 
                 "header": {},
                 "items": items,
             }
-        # Normalize invoice items from aliases
         if isinstance(parsed, dict) and str(parsed.get("document_type", "")).strip().lower().startswith("invoice"):
             items = parsed.get("items", []) or []
             norm_items = []
@@ -203,7 +253,6 @@ def parse_extraction_response(text: str, file_name: str, logs_dir: str = "") -> 
                     }
                 )
             parsed["items"] = norm_items
-        # Normalize challan items from Gemini field names (piece_no, finished_mtrs)
         elif isinstance(parsed, dict) and "challan" in str(parsed.get("document_type", "")).strip().lower():
             items = parsed.get("items", []) or []
             norm_items = []

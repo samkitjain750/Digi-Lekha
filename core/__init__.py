@@ -1,1 +1,1 @@
-# Core modules: document processing, Gemini extraction, Excel writing, config.
+# Core modules: document processing, OpenAI extraction, Excel writing, config.

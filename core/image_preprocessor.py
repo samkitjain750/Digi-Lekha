@@ -1,6 +1,6 @@
 """
 Image preprocessing for document extraction: PDF to images, contrast enhancement, resize.
-Used by document_processor before sending to Gemini.
+Used by document_processor before sending to OpenAI Vision.
 """
 import os
 from PIL import Image, ImageEnhance

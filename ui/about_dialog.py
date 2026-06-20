@@ -55,7 +55,7 @@ class AboutDialog(ctk.CTkToplevel):
         # Description
         desc = (
             "Extract structured data from scanned invoices and delivery challans "
-            "using Google Gemini Vision and export the results to Excel."
+            "using OpenAI Vision and export the results to Excel."
         )
         ctk.CTkLabel(
             inner,

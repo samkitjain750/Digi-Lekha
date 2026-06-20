@@ -1,5 +1,5 @@
 """
-Document processing pipeline: discover files, preprocess images, call Gemini,
+Document processing pipeline: discover files, preprocess images, call OpenAI Vision,
 parse response, write Excel, move processed files. Runs in a worker thread.
 """
 import os
@@ -8,7 +8,7 @@ import shutil
 from datetime import datetime
 
 from .image_preprocessor import preprocess_image, cleanup_temp_files
-from .gemini_extractor import extract_from_images, parse_extraction_response, get_gemini_api_key
+from .openai_extractor import extract_from_images, parse_extraction_response, get_openai_api_key
 from .excel_writer import write_to_excel, write_invoice_to_excel
 
 
@@ -65,9 +65,9 @@ def process_documents(
     status_callback(text: str)
     on_file_done(filename: str, status: str, doc_type: str, items_count: int)  # optional
     """
-    if not get_gemini_api_key(base_dir):
+    if not get_openai_api_key(base_dir):
         if log_callback:
-            log_callback("Gemini API Key required. Set GEMINI_API_KEY in env or .env.", True)
+            log_callback("OpenAI API Key required. Set OPENAI_API_KEY in env or .env.", True)
         return
 
     processed_dir, logs_dir = ensure_directories(input_dir, output_dir, base_dir)
@@ -113,7 +113,7 @@ def process_documents(
             continue
 
         if log_callback:
-            log_callback("Sending to Gemini API...")
+            log_callback("Sending to OpenAI API...")
         response_text = extract_from_images(processed_images, config, base_dir, log_callback)
         if not response_text:
             if log_callback:

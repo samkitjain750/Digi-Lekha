@@ -1,5 +1,5 @@
 """
-First-run setup: prompt for Gemini API key when not found.
+First-run setup: prompt for OpenAI API key when not found.
 Stores key in config/api_key.json (writable app data when frozen).
 """
 import customtkinter as ctk
@@ -8,7 +8,7 @@ PRIMARY = "#3B82F6"
 
 
 class ApiKeySetupDialog(ctk.CTkToplevel):
-    """Modal dialog to enter and save Gemini API key."""
+    """Modal dialog to enter and save OpenAI API key."""
 
     def __init__(self, parent, on_saved, **kwargs):
         super().__init__(parent, **kwargs)
@@ -29,13 +29,13 @@ class ApiKeySetupDialog(ctk.CTkToplevel):
         inner.pack(fill="both", expand=True, padx=32, pady=24)
         ctk.CTkLabel(
             inner,
-            text="Gemini API Key Required",
+            text="OpenAI API Key Required",
             font=ctk.CTkFont(size=18, weight="bold"),
             text_color=("gray10", "gray90"),
         ).pack(anchor="w", pady=(0, 8))
         ctk.CTkLabel(
             inner,
-            text="Enter your Google Gemini API key. It will be stored locally and used for document extraction.",
+            text="Enter your OpenAI API key. It will be stored locally and used for document extraction.",
             font=ctk.CTkFont(size=13),
             text_color=("#64748B", "gray70"),
             wraplength=400,

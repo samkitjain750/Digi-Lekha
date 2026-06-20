@@ -196,7 +196,12 @@ def _build_validation_rows(line_items: list, file_name: str) -> list:
                 if shrink < 2 or shrink > 10:
                     issue_parts.append("shrinkage outside 2%-10%")
         else:
-            issue_parts.append("missing numeric value(s)")
+            missing = []
+            if grey is None:
+                missing.append("grey_mtrs")
+            if finished is None:
+                missing.append("finished_mtrs")
+            issue_parts.append(f"missing numeric value(s): {', '.join(missing)}")
 
         final_flag = model_flag or len(issue_parts) > 0
         if not reason and issue_parts:

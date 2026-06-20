@@ -17,6 +17,7 @@ BG_CARD = "#FFFFFF"
 
 CHALLAN_TABLE_FIELDS = {
     "piece_number": "Piece No",
+    "grey_mtrs": "Grey Mtrs",
     "dispatch_mtr": "Finished Mtrs (Dispatch Mtr)",
 }
 
