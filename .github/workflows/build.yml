@@ -30,8 +30,10 @@ jobs:
         shell: cmd
 
       - name: Zip Windows app folder
+        shell: pwsh
         run: |
-          powershell Compress-Archive -Path "dist\Digi Lekha\*" -DestinationPath "dist\Digi-Lekha-Windows.zip" -Force
+          Set-Location dist
+          Compress-Archive -Path 'Digi Lekha' -DestinationPath 'Digi-Lekha-Windows.zip' -Force
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
