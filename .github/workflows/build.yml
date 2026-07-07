@@ -29,11 +29,15 @@ jobs:
         run: build_win.bat
         shell: cmd
 
+      - name: Zip Windows app folder
+        run: |
+          powershell Compress-Archive -Path "dist\Digi Lekha" -DestinationPath "dist\Digi-Lekha-Windows.zip" -Force
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: Digi-Lekha-Windows
-          path: dist/Digi Lekha.exe
+          path: dist/Digi-Lekha-Windows.zip
           if-no-files-found: error
 
   build-macos:

@@ -24,5 +24,6 @@ python -m PyInstaller DigiLekha.spec --noconfirm --clean
 if errorlevel 1 exit /b 1
 
 echo.
-echo Done. Exe: dist\Digi Lekha.exe
-echo Share that file with Windows users (zip it for download).
+echo Done. Windows app folder: dist\Digi Lekha\
+echo Run: dist\Digi Lekha\Digi Lekha.exe
+echo Zip that folder before sharing (do not send raw .exe over WhatsApp).
