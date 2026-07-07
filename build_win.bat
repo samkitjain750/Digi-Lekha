@@ -23,6 +23,16 @@ if not exist "assets\icons\app_icon.ico" (
 python -m PyInstaller DigiLekha.spec --noconfirm --clean
 if errorlevel 1 exit /b 1
 
+REM Folder icon in Explorer: point desktop.ini at the exe icon
+(
+echo [.ShellClassInfo]
+echo IconResource=Digi Lekha.exe,0
+echo ConfirmFileOp=0
+echo InfoTip=Digi Lekha - Document Extractor
+) > "dist\Digi Lekha\desktop.ini"
+attrib +s "dist\Digi Lekha"
+attrib +h "dist\Digi Lekha\desktop.ini"
+
 echo.
 echo Done. Windows app folder: dist\Digi Lekha\
 echo Run: dist\Digi Lekha\Digi Lekha.exe

@@ -46,11 +46,14 @@ def _base_icon_image():
 
 
 def make_ico():
+    """Write a multi-resolution .ico (Windows needs 16–256px embedded)."""
     ico_path = os.path.join(ICONS_DIR, "app_icon.ico")
     img = _base_icon_image()
-    sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
+    if img.width < 256:
+        img = img.resize((256, 256), Image.Resampling.LANCZOS)
+    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     img.save(ico_path, format="ICO", sizes=sizes)
-    print(f"Wrote {ico_path}")
+    print(f"Wrote {ico_path} ({len(sizes)} sizes)")
 
 
 def make_icns():

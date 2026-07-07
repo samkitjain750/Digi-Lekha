@@ -29,6 +29,19 @@ jobs:
         run: build_win.bat
         shell: cmd
 
+      - name: Set folder icon (desktop.ini)
+        shell: pwsh
+        run: |
+          Set-Location 'dist/Digi Lekha'
+          @"
+          [.ShellClassInfo]
+          IconResource=Digi Lekha.exe,0
+          ConfirmFileOp=0
+          InfoTip=Digi Lekha - Document Extractor
+          "@ | Set-Content -Path desktop.ini -Encoding ASCII
+          attrib +s ..
+          attrib +h desktop.ini
+
       - name: Zip Windows app folder
         shell: pwsh
         run: |
