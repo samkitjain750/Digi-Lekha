@@ -2,11 +2,13 @@
 Excel export: normalize extracted data, filter columns by config, append to extracted_data.xlsx.
 """
 import os
+import re
 import pandas as pd
 from datetime import datetime
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Alignment
 
 from core.invoice_validation import validate_invoice_line_row, _parse_number as _inv_parse_num
+from core.prior_pieces import apply_prior_year_dash, load_prior_piece_set
 
 
 def _safe_float(value):
@@ -20,6 +22,94 @@ def _safe_float(value):
         return float(s) if s else None
     except (ValueError, TypeError):
         return None
+
+
+def _excel_number(value):
+    """
+    Value suitable for an Excel number cell: int/float, or None for blank.
+    Whole numbers become int; others keep up to 2 decimal places.
+    """
+    n = _safe_float(value)
+    if n is None:
+        return None
+    if float(n).is_integer():
+        return int(n)
+    return round(float(n), 2)
+
+
+def _apply_numeric_cell_types(ws, numeric_headers: set) -> None:
+    """Ensure listed header columns store Python numbers (not text)."""
+    if ws is None or ws.max_row < 1:
+        return
+    header = [c.value for c in ws[1]]
+    col_idxs = []
+    for name in numeric_headers:
+        if name in header:
+            col_idxs.append(header.index(name) + 1)
+    if not col_idxs:
+        return
+    for row_idx in range(2, ws.max_row + 1):
+        for col_idx in col_idxs:
+            cell = ws.cell(row=row_idx, column=col_idx)
+            num = _excel_number(cell.value)
+            if num is None:
+                cell.value = None
+            else:
+                cell.value = num
+                cell.number_format = "0.##"
+
+
+def _safe_filename_part(value: str, fallback: str = "UNKNOWN") -> str:
+    """Sanitize a string for use in a filename."""
+    s = str(value or "").strip()
+    if not s:
+        s = fallback
+    s = re.sub(r"[^\w\-.]+", "_", s, flags=re.UNICODE)
+    s = re.sub(r"_+", "_", s).strip("._-")
+    return s or fallback
+
+
+def _header_first(header: dict, *keys: str) -> str:
+    """Return first non-empty header value among keys."""
+    if not isinstance(header, dict):
+        return ""
+    for k in keys:
+        v = header.get(k)
+        if v is not None and str(v).strip() != "":
+            return str(v).strip()
+    return ""
+
+
+def build_challan_excel_filename(data: dict) -> str:
+    """
+    Name: <ChallanNo>_<CompanyName>.xlsx
+    Company is the From side (mill / supplier), not the To / buyer.
+    """
+    header = data.get("header", {}) or {}
+    challan_no = _header_first(header, "challan_number", "challan_no")
+    company = _header_first(
+        header,
+        "company_name",
+        "supplier_name",
+        "from_company",
+        "mill_name",
+    )
+    return f"{_safe_filename_part(challan_no, 'NO_CHALLAN')}_{_safe_filename_part(company)}.xlsx"
+
+
+def build_invoice_excel_filename(data: dict) -> str:
+    """Name: <InvoiceNo>_<CompanyName>.xlsx"""
+    header = data.get("header", {}) or {}
+    inv_no = _header_first(header, "invoice_number", "invoice_no")
+    company = _header_first(
+        header,
+        "bill_to",
+        "buyer_name",
+        "party_name",
+        "supplier_name",
+        "company_name",
+    )
+    return f"{_safe_filename_part(inv_no, 'NO_INVOICE')}_{_safe_filename_part(company)}.xlsx"
 
 
 def _normalize_document_type(doc_type: str) -> str:
@@ -131,9 +221,41 @@ DOC_STATIC_COLS = ["file_name", "document_type"]
 ITEM_STATIC_COLS = []
 
 # Export headers required by challan import format.
-EXPORT_PIECE_COL = "Piece No"
-EXPORT_GREY_COL = "Grey Mtrs"
-EXPORT_MTR_COL = "Finished Mtrs"
+EXPORT_PIECE_COL = "Process PieceNo"
+EXPORT_GREY_COL = "Grey Mtr"
+EXPORT_MTR_COL = "Finish Mtr"
+ITEMS_SHEET_NAME = "Sheet1"
+
+# Piece-number characters that should flag a validation row red.
+_PIECE_FLAG_CHARS = set("IJLOQVW")
+
+
+def _piece_has_flag_chars(piece: str) -> bool:
+    """True if piece contains I, J, L, O, Q, V, W, or the substring TP (case-insensitive)."""
+    s = str(piece or "").upper()
+    if "TP" in s:
+        return True
+    return any(ch in _PIECE_FLAG_CHARS for ch in s)
+
+
+def _strip_tp_from_piece(piece: str) -> str:
+    """
+    Remove TP from piece number for Items export (case-insensitive).
+    Also removes bracketed forms like (TP), [TP], {TP} so 223ZC(TP) -> 223ZC.
+    """
+    s = str(piece or "")
+    # Drop whole bracketed TP markers first (avoids leftover empty brackets).
+    s = re.sub(r"[\(\[\{]\s*TP\s*[\)\]\}]", "", s, flags=re.IGNORECASE)
+    # Remove any remaining TP/Tp/tP/tp substrings.
+    out = []
+    i = 0
+    while i < len(s):
+        if i + 1 < len(s) and s[i].upper() == "T" and s[i + 1].upper() == "P":
+            i += 2
+            continue
+        out.append(s[i])
+        i += 1
+    return "".join(out).strip()
 
 
 def get_document_columns(config: dict) -> list:
@@ -168,82 +290,133 @@ def get_item_columns(config: dict) -> list:
         out.append(EXPORT_GREY_COL)
     if "dispatch_mtr" in selected:
         out.append(EXPORT_MTR_COL)
+    # Always keep Grey Mtr between piece and finish when piece+finish are present.
+    if EXPORT_PIECE_COL in out and EXPORT_MTR_COL in out and EXPORT_GREY_COL not in out:
+        piece_idx = out.index(EXPORT_PIECE_COL)
+        out.insert(piece_idx + 1, EXPORT_GREY_COL)
     return ITEM_STATIC_COLS + out
+
+
+def _line_item_flag_reason(r: dict) -> tuple[bool, str, object]:
+    """
+    Return (is_flagged, reason, shrinkage_value) for one line item.
+    Same rules as Validation_Report.
+    """
+    piece = str(r.get("piece_number", "") or "").strip()
+    grey = _safe_float(r.get("grey_mtrs"))
+    finished = _safe_float(r.get("dispatch_mtr"))
+    model_flag = bool(r.get("flag", False))
+    reason = str(r.get("reason", "") or "").strip()
+    issue_parts = []
+    shrinkage = ""
+
+    if _piece_has_flag_chars(piece):
+        issue_parts.append("piece_no contains I/J/L/O/Q/V/W or TP")
+
+    if grey is not None and finished is not None:
+        if finished >= grey:
+            issue_parts.append("finished_mtrs is not smaller than grey_mtrs")
+        if grey != 0:
+            shrink = ((grey - finished) / grey) * 100.0
+            shrinkage = round(shrink, 2)
+            if shrink < 2 or shrink > 10:
+                issue_parts.append("shrinkage outside 2%-10%")
+    else:
+        missing = []
+        if grey is None:
+            missing.append("grey_mtrs")
+        if finished is None:
+            missing.append("finished_mtrs")
+        issue_parts.append(f"missing numeric value(s): {', '.join(missing)}")
+
+    final_flag = model_flag or len(issue_parts) > 0
+    if not reason and issue_parts:
+        reason = "; ".join(issue_parts)
+    return final_flag, reason, shrinkage
 
 
 def _build_validation_rows(line_items: list, file_name: str) -> list:
     """
-    Build validation report rows using extraction flags + deterministic checks:
-    - finished_mtrs < grey_mtrs
-    - shrinkage between 2% and 10%
+    Build validation report rows using extraction flags + deterministic checks.
+    Only flagged (wrong) rows are returned.
     """
     rows = []
-    for r in line_items:
+    for idx, r in enumerate(line_items, start=1):
+        final_flag, reason, shrinkage = _line_item_flag_reason(r)
+        if not final_flag:
+            continue
         piece = str(r.get("piece_number", "") or "").strip()
         grey = _safe_float(r.get("grey_mtrs"))
         finished = _safe_float(r.get("dispatch_mtr"))
-        model_flag = bool(r.get("flag", False))
-        reason = str(r.get("reason", "") or "").strip()
-        issue_parts = []
-        shrinkage = ""
-
-        if grey is not None and finished is not None:
-            if finished >= grey:
-                issue_parts.append("finished_mtrs is not smaller than grey_mtrs")
-            if grey != 0:
-                shrink = ((grey - finished) / grey) * 100.0
-                shrinkage = round(shrink, 2)
-                if shrink < 2 or shrink > 10:
-                    issue_parts.append("shrinkage outside 2%-10%")
-        else:
-            missing = []
-            if grey is None:
-                missing.append("grey_mtrs")
-            if finished is None:
-                missing.append("finished_mtrs")
-            issue_parts.append(f"missing numeric value(s): {', '.join(missing)}")
-
-        final_flag = model_flag or len(issue_parts) > 0
-        if not reason and issue_parts:
-            reason = "; ".join(issue_parts)
-
         rows.append(
             {
+                "S No.": int(idx),
                 "file_name": file_name,
                 "piece_no": piece,
-                "grey_mtrs": "" if grey is None else grey,
-                "finished_mtrs": "" if finished is None else finished,
-                "shrinkage_percent": shrinkage,
-                "flag": final_flag,
+                "grey_mtrs": _excel_number(grey),
+                "finished_mtrs": _excel_number(finished),
+                "shrinkage_percent": _excel_number(shrinkage) if shrinkage != "" else None,
+                "flag": True,
                 "reason": reason,
             }
         )
     return rows
 
 
+def _apply_red_fill_rows(ws, excel_rows: list) -> None:
+    """Fill the given 1-based Excel row numbers with validation red."""
+    if ws is None or not excel_rows:
+        return
+    red_fill = PatternFill(start_color="FDECEC", end_color="FDECEC", fill_type="solid")
+    max_col = ws.max_column or 1
+    for row_idx in excel_rows:
+        for col_idx in range(1, max_col + 1):
+            ws.cell(row=row_idx, column=col_idx).fill = red_fill
+
+
 def _apply_validation_row_colors(ws, start_data_row: int, end_data_row: int) -> None:
     """
-    Color rows in Validation_Report:
-    - green when flag is false
-    - red when flag is true
+    Color rows in Validation_Report red (only wrong/flagged rows are written).
     """
     if end_data_row < start_data_row:
         return
-    header = [c.value for c in ws[1]]
-    try:
-        flag_col_idx = header.index("flag") + 1  # 1-based
-    except ValueError:
-        return
+    _apply_red_fill_rows(ws, list(range(start_data_row, end_data_row + 1)))
 
-    green_fill = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
-    red_fill = PatternFill(start_color="FDECEC", end_color="FDECEC", fill_type="solid")
 
-    for row_idx in range(start_data_row, end_data_row + 1):
-        flag_val = ws.cell(row=row_idx, column=flag_col_idx).value
-        is_flagged = str(flag_val).strip().lower() in {"true", "1", "yes"}
-        fill = red_fill if is_flagged else green_fill
+def _sheet1_rows_for_flagged(line_items: list, data_start_row: int) -> list:
+    """
+    Excel row numbers on Sheet1 that correspond to flagged line items.
+    data_start_row: 1-based row of the first item in this write batch.
+    """
+    rows = []
+    for i, r in enumerate(line_items):
+        flagged, _, _ = _line_item_flag_reason(r)
+        if flagged:
+            rows.append(data_start_row + i)
+    return rows
+
+
+def _apply_left_alignment(ws) -> None:
+    """Force left alignment for all cells in the worksheet."""
+    alignment = Alignment(horizontal="left", vertical="top")
+    for row_idx in range(1, ws.max_row + 1):
         for col_idx in range(1, ws.max_column + 1):
-            ws.cell(row=row_idx, column=col_idx).fill = fill
+            ws.cell(row=row_idx, column=col_idx).alignment = alignment
+
+
+VALIDATION_COLUMNS = [
+    "S No.",
+    "file_name",
+    "piece_no",
+    "grey_mtrs",
+    "finished_mtrs",
+    "shrinkage_percent",
+    "flag",
+    "reason",
+]
+
+ITEMS_NUMERIC_HEADERS = {EXPORT_GREY_COL, EXPORT_MTR_COL}
+VALIDATION_NUMERIC_HEADERS = {"S No.", "grey_mtrs", "finished_mtrs", "shrinkage_percent"}
 
 
 def write_to_excel(
@@ -254,73 +427,104 @@ def write_to_excel(
     output_file: str = None,
 ) -> bool:
     """
-    Append one document's extracted data to extracted_data.xlsx.
-    Only columns in config are written. Creates file/sheets if missing.
+    Write one document's extracted data to an Excel file.
+    Creates the file if missing; appends Sheet1 / Validation_Report if it already exists
+    (e.g. continuation page of the same challan).
+    Validation_Report includes only wrong (flagged) rows.
     """
     output_file = output_file or os.path.join(output_dir, "extracted_data.xlsx")
-    doc_type = _normalize_document_type(data.get("document_type", ""))
-    header = data.get("header", {})
     items = data.get("items", [])
-
-    doc_row = _build_full_doc_row(header, file_name, doc_type)
-    doc_cols = get_document_columns(config)
-    doc_summary = {k: doc_row.get(k, "") for k in doc_cols}
 
     line_items = [_normalize_item_row(it, file_name) for it in items]
     item_cols = get_item_columns(config)
+    prior_set = load_prior_piece_set()
     rows_items = []
     for r in line_items:
         row = {}
         if EXPORT_PIECE_COL in item_cols:
-            row[EXPORT_PIECE_COL] = r.get("piece_number", "")
+            # Sheet1: strip TP; prefix '-' if piece is in prior-year due list.
+            piece = _strip_tp_from_piece(r.get("piece_number", ""))
+            row[EXPORT_PIECE_COL] = apply_prior_year_dash(piece, prior_set)
         if EXPORT_GREY_COL in item_cols:
-            row[EXPORT_GREY_COL] = r.get("grey_mtrs", "")
+            row[EXPORT_GREY_COL] = _excel_number(r.get("grey_mtrs", ""))
         if EXPORT_MTR_COL in item_cols:
-            row[EXPORT_MTR_COL] = r.get("dispatch_mtr", "")
+            row[EXPORT_MTR_COL] = _excel_number(r.get("dispatch_mtr", ""))
         rows_items.append(row)
+
     validation_rows = _build_validation_rows(line_items, file_name)
 
-    df_doc = pd.DataFrame([doc_summary])
     df_items = pd.DataFrame(rows_items)
-    df_validation = pd.DataFrame(
-        validation_rows,
-        columns=[
-            "file_name",
-            "piece_no",
-            "grey_mtrs",
-            "finished_mtrs",
-            "shrinkage_percent",
-            "flag",
-            "reason",
-        ],
-    )
+    df_validation = pd.DataFrame(validation_rows, columns=VALIDATION_COLUMNS)
 
     try:
         if not os.path.exists(output_file):
             with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
-                df_doc.to_excel(writer, sheet_name="Documents", index=False)
-                df_items.to_excel(writer, sheet_name="Items", index=False)
+                df_items.to_excel(writer, sheet_name=ITEMS_SHEET_NAME, index=False)
                 df_validation.to_excel(writer, sheet_name="Validation_Report", index=False)
                 ws_v = writer.sheets.get("Validation_Report")
-                if ws_v is not None:
+                if ws_v is not None and len(df_validation) > 0:
                     _apply_validation_row_colors(ws_v, 2, 1 + len(df_validation))
+                ws_i = writer.sheets.get(ITEMS_SHEET_NAME)
+                if ws_i is not None:
+                    # Header is row 1; first item is row 2.
+                    _apply_red_fill_rows(ws_i, _sheet1_rows_for_flagged(line_items, 2))
+                    _apply_numeric_cell_types(ws_i, ITEMS_NUMERIC_HEADERS)
+                    _apply_left_alignment(ws_i)
+                if ws_v is not None:
+                    _apply_numeric_cell_types(ws_v, VALIDATION_NUMERIC_HEADERS)
+                    _apply_left_alignment(ws_v)
         else:
             with pd.ExcelWriter(output_file, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-                startrow = writer.sheets["Documents"].max_row
-                df_doc.to_excel(writer, sheet_name="Documents", startrow=startrow, index=False, header=False)
-                startrow = writer.sheets["Items"].max_row
-                df_items.to_excel(writer, sheet_name="Items", startrow=startrow, index=False, header=False)
+                items_sheet = (
+                    ITEMS_SHEET_NAME
+                    if ITEMS_SHEET_NAME in writer.sheets
+                    else ("Items" if "Items" in writer.sheets else ITEMS_SHEET_NAME)
+                )
+                if items_sheet not in writer.sheets:
+                    df_items.to_excel(writer, sheet_name=ITEMS_SHEET_NAME, index=False)
+                    ws_i = writer.sheets.get(ITEMS_SHEET_NAME)
+                    sheet1_data_start = 2
+                else:
+                    startrow = writer.sheets[items_sheet].max_row
+                    df_items.to_excel(
+                        writer,
+                        sheet_name=items_sheet,
+                        startrow=startrow,
+                        index=False,
+                        header=False,
+                    )
+                    ws_i = writer.sheets.get(items_sheet)
+                    # pandas writes first data row at startrow + 1
+                    sheet1_data_start = startrow + 1
+                if ws_i is not None:
+                    _apply_red_fill_rows(
+                        ws_i, _sheet1_rows_for_flagged(line_items, sheet1_data_start)
+                    )
+                    _apply_numeric_cell_types(ws_i, ITEMS_NUMERIC_HEADERS)
+                    _apply_left_alignment(ws_i)
                 if "Validation_Report" not in writer.sheets:
                     df_validation.to_excel(writer, sheet_name="Validation_Report", index=False)
                     ws_v = writer.sheets.get("Validation_Report")
-                    if ws_v is not None:
+                    if ws_v is not None and len(df_validation) > 0:
                         _apply_validation_row_colors(ws_v, 2, 1 + len(df_validation))
                 else:
                     startrow = writer.sheets["Validation_Report"].max_row
-                    df_validation.to_excel(writer, sheet_name="Validation_Report", startrow=startrow, index=False, header=False)
-                    ws_v = writer.sheets.get("Validation_Report")
-                    if ws_v is not None:
-                        _apply_validation_row_colors(ws_v, startrow + 1, startrow + len(df_validation))
+                    if len(df_validation) > 0:
+                        df_validation.to_excel(
+                            writer,
+                            sheet_name="Validation_Report",
+                            startrow=startrow,
+                            index=False,
+                            header=False,
+                        )
+                        ws_v = writer.sheets.get("Validation_Report")
+                        if ws_v is not None:
+                            _apply_validation_row_colors(ws_v, startrow + 1, startrow + len(df_validation))
+                    else:
+                        ws_v = writer.sheets.get("Validation_Report")
+                if ws_v is not None:
+                    _apply_numeric_cell_types(ws_v, VALIDATION_NUMERIC_HEADERS)
+                    _apply_left_alignment(ws_v)
         return True
     except Exception:
         raise
@@ -428,6 +632,14 @@ def write_invoice_to_excel(
                 ws_v = writer.sheets.get("Invoice_Validation")
                 if ws_v is not None and len(df_val) > 0:
                     _apply_validation_row_colors(ws_v, 2, 1 + len(df_val))
+                ws_d = writer.sheets.get("Invoice_Documents")
+                if ws_d is not None:
+                    _apply_left_alignment(ws_d)
+                ws_i = writer.sheets.get("Invoice_Items")
+                if ws_i is not None:
+                    _apply_left_alignment(ws_i)
+                if ws_v is not None:
+                    _apply_left_alignment(ws_v)
         else:
             with pd.ExcelWriter(output_file, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
                 if "Invoice_Documents" not in writer.sheets:
@@ -442,6 +654,13 @@ def write_invoice_to_excel(
                     startrow = writer.sheets["Invoice_Items"].max_row
                     df_items.to_excel(writer, sheet_name="Invoice_Items", startrow=startrow, index=False, header=False)
 
+                ws_d = writer.sheets.get("Invoice_Documents")
+                if ws_d is not None:
+                    _apply_left_alignment(ws_d)
+                ws_i = writer.sheets.get("Invoice_Items")
+                if ws_i is not None:
+                    _apply_left_alignment(ws_i)
+
                 if "Invoice_Validation" not in writer.sheets:
                     df_val.to_excel(writer, sheet_name="Invoice_Validation", index=False)
                     ws_v = writer.sheets.get("Invoice_Validation")
@@ -453,6 +672,8 @@ def write_invoice_to_excel(
                     ws_v = writer.sheets.get("Invoice_Validation")
                     if ws_v is not None and len(df_val) > 0:
                         _apply_validation_row_colors(ws_v, startrow + 1, startrow + len(df_val))
+                if ws_v is not None:
+                    _apply_left_alignment(ws_v)
         return True
     except Exception:
         raise

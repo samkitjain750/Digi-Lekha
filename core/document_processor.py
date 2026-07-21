@@ -9,7 +9,10 @@ from datetime import datetime
 
 from .image_preprocessor import preprocess_image, cleanup_temp_files
 from .openai_extractor import extract_from_images, parse_extraction_response, get_openai_api_key
-from .excel_writer import write_to_excel, write_invoice_to_excel
+from .excel_writer import (
+    write_to_excel,
+    build_challan_excel_filename,
+)
 
 
 def ensure_directories(input_dir: str, output_dir: str, base_dir: str) -> tuple[str, str]:
@@ -47,6 +50,73 @@ def move_to_processed(file_path: str, processed_dir: str, log_callback=None) -> 
         log_callback(f"Moved {name} to processed folder")
 
 
+def _header_value(header: dict, *keys: str) -> str:
+    if not isinstance(header, dict):
+        return ""
+    for k in keys:
+        v = header.get(k)
+        if v is not None and str(v).strip() != "":
+            return str(v).strip()
+    return ""
+
+
+def _apply_header_carryforward(data: dict, last_header: dict) -> dict:
+    """
+    Continuation pages often omit Challan No. / company.
+    Reuse the previous page header when the current page has no challan_number.
+    If challan_number matches the previous page, keep the previous company name
+    so OCR typos do not create a second Excel for the same challan.
+    """
+    header = dict(data.get("header") or {})
+    curr_challan = _header_value(header, "challan_number", "challan_no")
+    last_challan = _header_value(last_header, "challan_number", "challan_no")
+
+    if not curr_challan and last_header:
+        merged = dict(last_header)
+        for k, v in header.items():
+            if v is not None and str(v).strip() != "":
+                merged[k] = v
+        # Prefer stable From-company / challan identity from the previous page.
+        for key in ("company_name", "supplier_name", "from_company", "mill_name", "challan_number"):
+            if _header_value(last_header, key):
+                merged[key] = last_header[key]
+        data["header"] = merged
+        return merged
+
+    if curr_challan and last_challan and curr_challan == last_challan and last_header:
+        for key in ("company_name", "supplier_name", "from_company", "mill_name"):
+            if _header_value(last_header, key):
+                header[key] = last_header[key]
+        data["header"] = header
+        return header
+
+    data["header"] = header
+    return header
+
+
+def _write_challan_excel(
+    data: dict,
+    source_label: str,
+    output_dir: str,
+    challan_output_dir: str,
+    config: dict,
+    log_callback=None,
+) -> tuple[str, int]:
+    """Write/append one challan extraction. Returns (excel_path, items_count)."""
+    excel_name = build_challan_excel_filename(data)
+    challan_output_file = os.path.join(challan_output_dir, excel_name)
+    if log_callback:
+        log_callback(f"Challan Excel: {challan_output_file}")
+    write_to_excel(
+        data,
+        source_label,
+        output_dir,
+        config,
+        output_file=challan_output_file,
+    )
+    return challan_output_file, len(data.get("items", []) or [])
+
+
 def process_documents(
     input_dir: str,
     output_dir: str,
@@ -60,10 +130,8 @@ def process_documents(
 ) -> None:
     """
     Main processing loop. Call from a background thread.
-    log_callback(message: str, is_error: bool)
-    progress_callback(current: int, total: int)  # 1-based current
-    status_callback(text: str)
-    on_file_done(filename: str, status: str, doc_type: str, items_count: int)  # optional
+    Multi-page PDFs are extracted page-by-page so different challans become
+    separate Excel files; continuation pages of the same challan append together.
     """
     if not get_openai_api_key(base_dir):
         if log_callback:
@@ -72,16 +140,11 @@ def process_documents(
 
     processed_dir, logs_dir = ensure_directories(input_dir, output_dir, base_dir)
     run_date = datetime.now().strftime("%Y-%m-%d")
-    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     challan_output_dir = os.path.join(output_dir, "delivery_challan", run_date)
-    invoice_output_dir = os.path.join(output_dir, "invoice", run_date)
     os.makedirs(challan_output_dir, exist_ok=True)
-    os.makedirs(invoice_output_dir, exist_ok=True)
-    challan_output_file = os.path.join(challan_output_dir, f"delivery_challan_{run_stamp}.xlsx")
-    invoice_output_file = os.path.join(invoice_output_dir, f"invoice_{run_stamp}.xlsx")
     if log_callback:
-        log_callback(f"Run challan output: {challan_output_file}")
-        log_callback(f"Run invoice output: {invoice_output_file}")
+        log_callback(f"Challan output folder: {challan_output_dir}")
+        log_callback("Invoice export is disabled for now.")
     files = load_supported_files(input_dir)
 
     if not files:
@@ -112,61 +175,100 @@ def process_documents(
                 progress_callback(i + 1, total)
             continue
 
-        if log_callback:
-            log_callback("Sending to OpenAI API...")
-        response_text = extract_from_images(processed_images, config, base_dir, log_callback)
-        if not response_text:
-            if log_callback:
-                log_callback(f"Skipping {filename} due to API failure.", True)
-            if on_file_done:
-                on_file_done(filename, "error", "", 0)
-            cleanup_temp_files(processed_images)
-            if progress_callback:
-                progress_callback(i + 1, total)
-            continue
+        page_count = len(processed_images)
+        if log_callback and page_count > 1:
+            log_callback(f"Multi-page document ({page_count} pages) — extracting each page separately.")
 
-        if log_callback:
-            log_callback("Parsing response...")
+        last_header = {}
+        total_items = 0
+        wrote_any = False
+        saw_invoice_only = False
+        last_doc_type = "delivery_challan"
+        excel_files_written = set()
+
         try:
-            data = parse_extraction_response(response_text, filename, logs_dir)
-        except ValueError as e:
-            if log_callback:
-                log_callback(str(e), True)
-            if on_file_done:
-                on_file_done(filename, "error", "", 0)
+            for page_idx, page_image in enumerate(processed_images):
+                page_label = f"{filename}#page{page_idx + 1}" if page_count > 1 else filename
+                if log_callback:
+                    log_callback(f"Sending page {page_idx + 1}/{page_count} to OpenAI API...")
+
+                response_text = extract_from_images(
+                    [page_image], config, base_dir, log_callback
+                )
+                if not response_text:
+                    if log_callback:
+                        log_callback(f"Skipping page {page_idx + 1} due to API failure.", True)
+                    continue
+
+                if log_callback:
+                    log_callback(f"Parsing page {page_idx + 1} response...")
+                try:
+                    data = parse_extraction_response(response_text, page_label, logs_dir)
+                except ValueError as e:
+                    if log_callback:
+                        log_callback(str(e), True)
+                    continue
+
+                doc_type = str(data.get("document_type", "")).strip().lower()
+                last_doc_type = doc_type or last_doc_type
+                if "invoice" in doc_type:
+                    saw_invoice_only = saw_invoice_only or not wrote_any
+                    if log_callback:
+                        log_callback(
+                            f"Skipping invoice on page {page_idx + 1} (invoice export disabled)."
+                        )
+                    continue
+
+                header = _apply_header_carryforward(data, last_header)
+                if _header_value(header, "challan_number", "challan_no"):
+                    last_header = dict(data.get("header") or header)
+
+                items = data.get("items") or []
+                if not items:
+                    if log_callback:
+                        log_callback(f"No line items on page {page_idx + 1}.")
+                    continue
+
+                if log_callback:
+                    log_callback(f"Writing page {page_idx + 1} ({len(items)} items) to Excel...")
+                try:
+                    excel_path, n_items = _write_challan_excel(
+                        data,
+                        page_label,
+                        output_dir,
+                        challan_output_dir,
+                        config,
+                        log_callback=log_callback,
+                    )
+                    excel_files_written.add(excel_path)
+                    total_items += n_items
+                    wrote_any = True
+                    saw_invoice_only = False
+                except Exception as e:
+                    if log_callback:
+                        log_callback(f"Excel writing error on page {page_idx + 1}: {e}", True)
+                    continue
+        finally:
             cleanup_temp_files(processed_images)
+
+        if not wrote_any:
+            status = "skipped" if saw_invoice_only else "error"
+            if on_file_done:
+                on_file_done(filename, status, last_doc_type if saw_invoice_only else "", 0)
+            if saw_invoice_only:
+                move_to_processed(file_path, processed_dir, log_callback)
             if progress_callback:
                 progress_callback(i + 1, total)
             continue
 
-        if log_callback:
-            log_callback("Writing to Excel...")
-        try:
-            doc_type = str(data.get("document_type", "")).strip().lower()
-            if "invoice" in doc_type:
-                write_invoice_to_excel(data, filename, output_file=invoice_output_file)
-            else:
-                write_to_excel(data, filename, output_dir, config, output_file=challan_output_file)
-        except Exception as e:
-            if log_callback:
-                log_callback(f"Excel writing error: {e}", True)
-            if on_file_done:
-                on_file_done(filename, "error", "", 0)
-            cleanup_temp_files(processed_images)
-            if progress_callback:
-                progress_callback(i + 1, total)
-            continue
-
-        doc_type = data.get("document_type", "")
-        if isinstance(doc_type, dict):
-            doc_type = doc_type.get("document_type", "")
-        items_count = len(data.get("items", []))
         move_to_processed(file_path, processed_dir, log_callback)
         if log_callback:
-            log_callback("SUCCESS File processed")
+            log_callback(
+                f"SUCCESS {filename}: {total_items} items across "
+                f"{len(excel_files_written)} Excel file(s)"
+            )
         if on_file_done:
-            on_file_done(filename, "completed", str(doc_type), items_count)
-        cleanup_temp_files(processed_images)
+            on_file_done(filename, "completed", str(last_doc_type), total_items)
 
         if progress_callback:
             progress_callback(i + 1, total)

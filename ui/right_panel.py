@@ -50,10 +50,21 @@ class RightPanel(ctk.CTkFrame):
         if xlsx and os.path.isfile(xlsx):
             try:
                 import pandas as pd
-                df_doc = pd.read_excel(xlsx, sheet_name="Documents")
-                df_items = pd.read_excel(xlsx, sheet_name="Items")
-                doc_row = df_doc[df_doc["file_name"].astype(str).str.strip() == name]
-                items_rows = df_items[df_items["file_name"].astype(str).str.strip() == name]
+                xl = pd.ExcelFile(xlsx)
+                df_doc = pd.DataFrame()
+                if "Documents" in xl.sheet_names:
+                    df_doc = pd.read_excel(xl, sheet_name="Documents")
+                df_items = pd.read_excel(xl, sheet_name="Sheet1" if "Sheet1" in xl.sheet_names else "Items")
+                doc_row = (
+                    df_doc[df_doc["file_name"].astype(str).str.strip() == name]
+                    if not df_doc.empty and "file_name" in df_doc.columns
+                    else pd.DataFrame()
+                )
+                items_rows = (
+                    df_items[df_items["file_name"].astype(str).str.strip() == name]
+                    if "file_name" in df_items.columns
+                    else df_items
+                )
 
                 lines = []
                 if not doc_row.empty:

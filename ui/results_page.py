@@ -23,8 +23,9 @@ DOC_COLUMNS = [
 ]
 
 ITEM_COLUMNS = [
-    "Piece No",
-    "Finished Mtrs",
+    "Process PieceNo",
+    "Grey Mtr",
+    "Finish Mtr",
 ]
 
 # Default min width for columns (chars)
@@ -210,8 +211,11 @@ class ResultsPage(ctk.CTkFrame):
         def load_in_background():
             try:
                 import pandas as pd
-                df_doc = pd.read_excel(xlsx, sheet_name="Documents")
-                df_items = pd.read_excel(xlsx, sheet_name="Items")
+                xl = pd.ExcelFile(xlsx)
+                df_doc = pd.DataFrame()
+                if "Documents" in xl.sheet_names:
+                    df_doc = pd.read_excel(xl, sheet_name="Documents")
+                df_items = pd.read_excel(xl, sheet_name="Sheet1" if "Sheet1" in xl.sheet_names else "Items")
                 # Replace NaN with empty string
                 df_doc = df_doc.fillna("")
                 df_items = df_items.fillna("")
@@ -254,10 +258,26 @@ class ResultsPage(ctk.CTkFrame):
 
         # Line Items: insert row by row
         for _, row in df_items.iterrows():
-            # Support both new export headers and older internal names.
+            # Support new export headers and older column names.
             values = [
-                str(row.get("Piece No", row.get("piece_number", ""))),
-                str(row.get("Finished Mtrs", row.get("dispatch_mtr", ""))),
+                str(
+                    row.get(
+                        "Process PieceNo",
+                        row.get("Piece No", row.get("piece_number", "")),
+                    )
+                ),
+                str(
+                    row.get(
+                        "Grey Mtr",
+                        row.get("Grey Mtrs", row.get("grey_mtrs", "")),
+                    )
+                ),
+                str(
+                    row.get(
+                        "Finish Mtr",
+                        row.get("Finished Mtrs", row.get("dispatch_mtr", "")),
+                    )
+                ),
             ]
             self._items_tree.insert("", tk.END, values=values)
 

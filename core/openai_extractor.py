@@ -101,6 +101,16 @@ Always return ONLY valid JSON object (no markdown/no explanation):
 }
 
 For DELIVERY CHALLAN:
+- Extract ONLY the delivery challan visible on the provided page/image(s).
+- If this page is a continuation of a challan, still extract all visible line items;
+  include challan_number/party_name when printed on the page (even on Cont. pages).
+- Extract header fields when visible:
+  challan_number (header Challan No. only, NOT table Challan No.),
+  challan_date,
+  company_name (REQUIRED: From / mill / supplier company on the LEFT — e.g. MANSAROVAR INDUSTRIES; NOT the To/buyer),
+  party_name (To / buyer / consignee company on the RIGHT — e.g. SAFFRON SUITING),
+  party_address, ewb_no, vehicle_no, goods_value
+- Never put the To/buyer name into company_name.
 - Extract row-wise:
   piece_no, grey_mtrs, finished_mtrs, shrinkage_percent, flag, reason
 - Alias mapping:
@@ -113,6 +123,7 @@ For DELIVERY CHALLAN:
   3) normal shrinkage range 2%-10%, outside => flag true
   4) unclear text or column shift => flag true
   5) confusion I/J, O/0, S/5, B/8 => flag true
+- Do NOT invent rows from other challans. Skip quality-total / grand-total rows.
 
 For INVOICE:
 - Extract header fields when visible:
