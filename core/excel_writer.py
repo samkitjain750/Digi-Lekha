@@ -177,6 +177,9 @@ def _normalize_item_row(item: dict, file_name: str) -> dict:
         "grey_received_date": v("grey_received_date"),
         "grey_challan_number": v("grey_challan_number"),
         "beam": v("beam"),
+        "s_no": item.get("s_no", item.get("sno", item.get("serial_no", ""))),
+        "flag": bool(item.get("flag", False)),
+        "reason": v("reason"),
     }
     return row
 
@@ -335,13 +338,22 @@ def _line_item_flag_reason(r: dict) -> tuple[bool, str, object]:
     return final_flag, reason, shrinkage
 
 
+def _document_s_no(r: dict):
+    """Printed S.No. from the challan image (not Sheet1 row index)."""
+    raw = r.get("s_no", r.get("sno", r.get("serial_no", "")))
+    if raw is None or str(raw).strip() == "":
+        return None
+    return _excel_number(raw)
+
+
 def _build_validation_rows(line_items: list, file_name: str) -> list:
     """
     Build validation report rows using extraction flags + deterministic checks.
     Only flagged (wrong) rows are returned.
+    S No. is the printed document serial number from the image.
     """
     rows = []
-    for idx, r in enumerate(line_items, start=1):
+    for r in line_items:
         final_flag, reason, shrinkage = _line_item_flag_reason(r)
         if not final_flag:
             continue
@@ -350,7 +362,7 @@ def _build_validation_rows(line_items: list, file_name: str) -> list:
         finished = _safe_float(r.get("dispatch_mtr"))
         rows.append(
             {
-                "S No.": int(idx),
+                "S No.": _document_s_no(r),
                 "file_name": file_name,
                 "piece_no": piece,
                 "grey_mtrs": _excel_number(grey),
@@ -419,6 +431,89 @@ ITEMS_NUMERIC_HEADERS = {EXPORT_GREY_COL, EXPORT_MTR_COL}
 VALIDATION_NUMERIC_HEADERS = {"S No.", "grey_mtrs", "finished_mtrs", "shrinkage_percent"}
 
 
+def _build_sheet1_and_validation(
+    data: dict,
+    file_name: str,
+    config: dict,
+    *,
+    totals_note: str = "",
+    totals_failed: bool = False,
+) -> tuple:
+    """
+    Build Sheet1 + Validation_Report dataframes and flagged Sheet1 row indexes (1-based data start at 2).
+    """
+    items = data.get("items", []) or []
+    line_items = [_normalize_item_row(it, file_name) for it in items]
+    item_cols = get_item_columns(config)
+    prior_set = load_prior_piece_set()
+    rows_items = []
+    for r in line_items:
+        row = {}
+        if EXPORT_PIECE_COL in item_cols:
+            piece = _strip_tp_from_piece(r.get("piece_number", ""))
+            row[EXPORT_PIECE_COL] = apply_prior_year_dash(piece, prior_set)
+        if EXPORT_GREY_COL in item_cols:
+            row[EXPORT_GREY_COL] = _excel_number(r.get("grey_mtrs", ""))
+        if EXPORT_MTR_COL in item_cols:
+            row[EXPORT_MTR_COL] = _excel_number(r.get("dispatch_mtr", ""))
+        rows_items.append(row)
+
+    validation_rows = _build_validation_rows(line_items, file_name)
+    if totals_note and totals_failed:
+        validation_rows.append(
+            {
+                "S No.": None,
+                "file_name": file_name,
+                "piece_no": "",
+                "grey_mtrs": None,
+                "finished_mtrs": None,
+                "shrinkage_percent": None,
+                "flag": True,
+                "reason": totals_note,
+            }
+        )
+
+    df_items = pd.DataFrame(rows_items)
+    df_validation = pd.DataFrame(validation_rows, columns=VALIDATION_COLUMNS)
+    return df_items, df_validation, line_items
+
+
+def rewrite_challan_excel(
+    output_file: str,
+    data: dict,
+    file_name: str,
+    config: dict,
+    *,
+    totals_note: str = "",
+    totals_failed: bool = False,
+) -> bool:
+    """
+    Replace Sheet1 and Validation_Report entirely (used after totals correction).
+    """
+    df_items, df_validation, line_items = _build_sheet1_and_validation(
+        data,
+        file_name,
+        config,
+        totals_note=totals_note,
+        totals_failed=totals_failed,
+    )
+    with pd.ExcelWriter(output_file, engine="openpyxl", mode="w") as writer:
+        df_items.to_excel(writer, sheet_name=ITEMS_SHEET_NAME, index=False)
+        df_validation.to_excel(writer, sheet_name="Validation_Report", index=False)
+        ws_v = writer.sheets.get("Validation_Report")
+        if ws_v is not None and len(df_validation) > 0:
+            _apply_validation_row_colors(ws_v, 2, 1 + len(df_validation))
+        ws_i = writer.sheets.get(ITEMS_SHEET_NAME)
+        if ws_i is not None:
+            _apply_red_fill_rows(ws_i, _sheet1_rows_for_flagged(line_items, 2))
+            _apply_numeric_cell_types(ws_i, ITEMS_NUMERIC_HEADERS)
+            _apply_left_alignment(ws_i)
+        if ws_v is not None:
+            _apply_numeric_cell_types(ws_v, VALIDATION_NUMERIC_HEADERS)
+            _apply_left_alignment(ws_v)
+    return True
+
+
 def write_to_excel(
     data: dict,
     file_name: str,
@@ -433,28 +528,9 @@ def write_to_excel(
     Validation_Report includes only wrong (flagged) rows.
     """
     output_file = output_file or os.path.join(output_dir, "extracted_data.xlsx")
-    items = data.get("items", [])
-
-    line_items = [_normalize_item_row(it, file_name) for it in items]
-    item_cols = get_item_columns(config)
-    prior_set = load_prior_piece_set()
-    rows_items = []
-    for r in line_items:
-        row = {}
-        if EXPORT_PIECE_COL in item_cols:
-            # Sheet1: strip TP; prefix '-' if piece is in prior-year due list.
-            piece = _strip_tp_from_piece(r.get("piece_number", ""))
-            row[EXPORT_PIECE_COL] = apply_prior_year_dash(piece, prior_set)
-        if EXPORT_GREY_COL in item_cols:
-            row[EXPORT_GREY_COL] = _excel_number(r.get("grey_mtrs", ""))
-        if EXPORT_MTR_COL in item_cols:
-            row[EXPORT_MTR_COL] = _excel_number(r.get("dispatch_mtr", ""))
-        rows_items.append(row)
-
-    validation_rows = _build_validation_rows(line_items, file_name)
-
-    df_items = pd.DataFrame(rows_items)
-    df_validation = pd.DataFrame(validation_rows, columns=VALIDATION_COLUMNS)
+    df_items, df_validation, line_items = _build_sheet1_and_validation(
+        data, file_name, config
+    )
 
     try:
         if not os.path.exists(output_file):

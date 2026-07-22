@@ -13,6 +13,11 @@ from .excel_writer import (
     write_to_excel,
     build_challan_excel_filename,
 )
+from .totals_reconcile import (
+    header_grand_totals,
+    merge_header_totals,
+    reconcile_challan_excel,
+)
 
 
 def ensure_directories(input_dir: str, output_dir: str, base_dir: str) -> tuple[str, str]:
@@ -66,6 +71,7 @@ def _apply_header_carryforward(data: dict, last_header: dict) -> dict:
     Reuse the previous page header when the current page has no challan_number.
     If challan_number matches the previous page, keep the previous company name
     so OCR typos do not create a second Excel for the same challan.
+    Preserve printed Grand Totals once seen until a newer Grand Total overwrites them.
     """
     header = dict(data.get("header") or {})
     curr_challan = _header_value(header, "challan_number", "challan_no")
@@ -80,6 +86,11 @@ def _apply_header_carryforward(data: dict, last_header: dict) -> dict:
         for key in ("company_name", "supplier_name", "from_company", "mill_name", "challan_number"):
             if _header_value(last_header, key):
                 merged[key] = last_header[key]
+        merged = merge_header_totals(merged, header)
+        # If this page had no grand totals, keep previous.
+        g, f = header_grand_totals(header)
+        if g is None and f is None:
+            merged = merge_header_totals(merged, last_header)
         data["header"] = merged
         return merged
 
@@ -87,6 +98,9 @@ def _apply_header_carryforward(data: dict, last_header: dict) -> dict:
         for key in ("company_name", "supplier_name", "from_company", "mill_name"):
             if _header_value(last_header, key):
                 header[key] = last_header[key]
+        g, f = header_grand_totals(header)
+        if g is None and f is None:
+            header = merge_header_totals(header, last_header)
         data["header"] = header
         return header
 
@@ -117,6 +131,42 @@ def _write_challan_excel(
     return challan_output_file, len(data.get("items", []) or [])
 
 
+def _update_challan_state(
+    challan_states: dict,
+    excel_path: str,
+    data: dict,
+    page_image: str,
+    source_label: str,
+) -> None:
+    """Accumulate items, header totals, and page images per challan Excel."""
+    state = challan_states.setdefault(
+        excel_path,
+        {"items": [], "header": {}, "images": [], "source_label": source_label},
+    )
+    state["source_label"] = source_label
+    state["header"] = merge_header_totals(
+        dict(state.get("header") or {}),
+        dict(data.get("header") or {}),
+    )
+    # Keep identity fields from latest header when present.
+    for key in (
+        "challan_number",
+        "challan_no",
+        "company_name",
+        "party_name",
+        "ewb_no",
+        "goods_value",
+    ):
+        v = (data.get("header") or {}).get(key)
+        if v is not None and str(v).strip() != "":
+            state["header"][key] = v
+    for it in data.get("items") or []:
+        if isinstance(it, dict):
+            state["items"].append(dict(it))
+    if page_image and page_image not in state["images"]:
+        state["images"].append(page_image)
+
+
 def process_documents(
     input_dir: str,
     output_dir: str,
@@ -132,6 +182,7 @@ def process_documents(
     Main processing loop. Call from a background thread.
     Multi-page PDFs are extracted page-by-page so different challans become
     separate Excel files; continuation pages of the same challan append together.
+    After all files, printed Grand Totals are checked against extracted meter sums.
     """
     if not get_openai_api_key(base_dir):
         if log_callback:
@@ -156,37 +207,42 @@ def process_documents(
     if log_callback:
         log_callback(f"Found {total} files to process.")
 
-    for i, file_path in enumerate(files):
-        filename = os.path.basename(file_path)
-        if status_callback:
-            status_callback(f"Processing {i + 1} of {total}: {filename}")
-        if log_callback:
-            log_callback(f"--- Starting {filename} ---")
+    challan_states: dict = {}
+    all_temp_images: list = []
 
-        if log_callback:
-            log_callback("Preprocessing image...")
-        processed_images = preprocess_image(file_path, log_callback)
-        if not processed_images:
+    try:
+        for i, file_path in enumerate(files):
+            filename = os.path.basename(file_path)
+            if status_callback:
+                status_callback(f"Processing {i + 1} of {total}: {filename}")
             if log_callback:
-                log_callback(f"Skipping {filename} due to preprocessing failure.", True)
-            if on_file_done:
-                on_file_done(filename, "error", "", 0)
-            if progress_callback:
-                progress_callback(i + 1, total)
-            continue
+                log_callback(f"--- Starting {filename} ---")
 
-        page_count = len(processed_images)
-        if log_callback and page_count > 1:
-            log_callback(f"Multi-page document ({page_count} pages) — extracting each page separately.")
+            if log_callback:
+                log_callback("Preprocessing image...")
+            processed_images = preprocess_image(file_path, log_callback)
+            if not processed_images:
+                if log_callback:
+                    log_callback(f"Skipping {filename} due to preprocessing failure.", True)
+                if on_file_done:
+                    on_file_done(filename, "error", "", 0)
+                if progress_callback:
+                    progress_callback(i + 1, total)
+                continue
 
-        last_header = {}
-        total_items = 0
-        wrote_any = False
-        saw_invoice_only = False
-        last_doc_type = "delivery_challan"
-        excel_files_written = set()
+            all_temp_images.extend(processed_images)
+            page_count = len(processed_images)
+            if log_callback and page_count > 1:
+                log_callback(f"Multi-page document ({page_count} pages) — extracting each page separately.")
 
-        try:
+            last_header = {}
+            total_items = 0
+            wrote_any = False
+            saw_invoice_only = False
+            last_doc_type = "delivery_challan"
+            excel_files_written = set()
+            last_excel_path = None
+
             for page_idx, page_image in enumerate(processed_images):
                 page_label = f"{filename}#page{page_idx + 1}" if page_count > 1 else filename
                 if log_callback:
@@ -224,7 +280,25 @@ def process_documents(
                     last_header = dict(data.get("header") or header)
 
                 items = data.get("items") or []
+                g_tot, f_tot = header_grand_totals(header)
+                if g_tot is not None or f_tot is not None:
+                    if log_callback:
+                        log_callback(
+                            f"Grand Total on page {page_idx + 1}: "
+                            f"Grey={g_tot if g_tot is not None else '—'}, "
+                            f"Finish={f_tot if f_tot is not None else '—'}"
+                        )
+
                 if not items:
+                    # Still attach grand totals / image to the open challan when possible.
+                    if last_excel_path and (g_tot is not None or f_tot is not None):
+                        _update_challan_state(
+                            challan_states,
+                            last_excel_path,
+                            data,
+                            page_image,
+                            page_label,
+                        )
                     if log_callback:
                         log_callback(f"No line items on page {page_idx + 1}.")
                     continue
@@ -241,6 +315,14 @@ def process_documents(
                         log_callback=log_callback,
                     )
                     excel_files_written.add(excel_path)
+                    last_excel_path = excel_path
+                    _update_challan_state(
+                        challan_states,
+                        excel_path,
+                        data,
+                        page_image,
+                        page_label,
+                    )
                     total_items += n_items
                     wrote_any = True
                     saw_invoice_only = False
@@ -248,30 +330,51 @@ def process_documents(
                     if log_callback:
                         log_callback(f"Excel writing error on page {page_idx + 1}: {e}", True)
                     continue
-        finally:
-            cleanup_temp_files(processed_images)
 
-        if not wrote_any:
-            status = "skipped" if saw_invoice_only else "error"
+            if not wrote_any:
+                status = "skipped" if saw_invoice_only else "error"
+                if on_file_done:
+                    on_file_done(filename, status, last_doc_type if saw_invoice_only else "", 0)
+                if saw_invoice_only:
+                    move_to_processed(file_path, processed_dir, log_callback)
+                if progress_callback:
+                    progress_callback(i + 1, total)
+                continue
+
+            move_to_processed(file_path, processed_dir, log_callback)
+            if log_callback:
+                log_callback(
+                    f"SUCCESS {filename}: {total_items} items across "
+                    f"{len(excel_files_written)} Excel file(s)"
+                )
             if on_file_done:
-                on_file_done(filename, status, last_doc_type if saw_invoice_only else "", 0)
-            if saw_invoice_only:
-                move_to_processed(file_path, processed_dir, log_callback)
+                on_file_done(filename, "completed", str(last_doc_type), total_items)
+
             if progress_callback:
                 progress_callback(i + 1, total)
-            continue
 
-        move_to_processed(file_path, processed_dir, log_callback)
-        if log_callback:
-            log_callback(
-                f"SUCCESS {filename}: {total_items} items across "
-                f"{len(excel_files_written)} Excel file(s)"
-            )
-        if on_file_done:
-            on_file_done(filename, "completed", str(last_doc_type), total_items)
-
-        if progress_callback:
-            progress_callback(i + 1, total)
+        if challan_states:
+            if status_callback:
+                status_callback("Checking Grand Totals...")
+            if log_callback:
+                log_callback("--- Grand Total reconciliation ---")
+            for excel_path, state in challan_states.items():
+                try:
+                    reconcile_challan_excel(
+                        excel_path,
+                        state,
+                        config,
+                        base_dir,
+                        log_callback=log_callback,
+                    )
+                except Exception as e:
+                    if log_callback:
+                        log_callback(
+                            f"Totals reconciliation error for {os.path.basename(excel_path)}: {e}",
+                            True,
+                        )
+    finally:
+        cleanup_temp_files(all_temp_images)
 
     if status_callback:
         status_callback("Processing Complete!")

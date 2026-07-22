@@ -109,21 +109,30 @@ For DELIVERY CHALLAN:
   challan_date,
   company_name (REQUIRED: From / mill / supplier company on the LEFT — e.g. MANSAROVAR INDUSTRIES; NOT the To/buyer),
   party_name (To / buyer / consignee company on the RIGHT — e.g. SAFFRON SUITING),
-  party_address, ewb_no, vehicle_no, goods_value
+  party_address, ewb_no, vehicle_no, goods_value,
+  grand_total_grey_mtrs, grand_total_finished_mtrs
+- grand_total_grey_mtrs / grand_total_finished_mtrs <- ONLY from the printed "Grand Total" row
+  (Grey Mtrs. and Finished Mtrs. columns). Do NOT use Quality Total rows.
+  If Grand Total is not on this page, leave both as empty string.
 - Never put the To/buyer name into company_name.
-- Extract row-wise:
-  piece_no, grey_mtrs, finished_mtrs, shrinkage_percent, flag, reason
+- Extract row-wise ONLY for table rows that have a printed S.No. / S No. value:
+  s_no, piece_no, grey_mtrs, finished_mtrs, shrinkage_percent, flag, reason
+- s_no <- the number from the document's S.No. / S No. column (exact printed value, e.g. 59, 60, 91).
+  Do NOT invent sequential numbers. If a row has no S.No., skip that row entirely.
 - Alias mapping:
   finished_mtrs <- Finished Mtrs/Finished Mtr/Dispatch Mtr/Dispatch Mtrs/Final Mtrs/Net Mtrs
   grey_mtrs <- Grey Mtrs/Grey Mtr/Grey
   piece_no <- Piece No/Invoice No/Lot No/Roll No
+  s_no <- S.No./S No./SNo./Serial No
 - Rules:
   1) finished_mtrs < grey_mtrs
   2) shrinkage_percent = ((grey_mtrs - finished_mtrs)/grey_mtrs)*100
   3) normal shrinkage range 2%-10%, outside => flag true
   4) unclear text or column shift => flag true
   5) confusion I/J, O/0, S/5, B/8 => flag true
-- Do NOT invent rows from other challans. Skip quality-total / grand-total rows.
+- Do NOT invent rows from other challans.
+- Skip rows without S.No., quality-name headers, quality-total, grand-total, and summary-only rows
+  (unless that summary row itself has an S.No. in the S.No. column).
 
 For INVOICE:
 - Extract header fields when visible:
@@ -232,8 +241,12 @@ def parse_extraction_response(text: str, file_name: str, logs_dir: str = "") -> 
             for row in parsed:
                 if not isinstance(row, dict):
                     continue
+                s_no = row.get("s_no", row.get("sno", row.get("serial_no", "")))
+                if s_no is None or str(s_no).strip() == "":
+                    continue
                 items.append(
                     {
+                        "s_no": s_no,
                         "piece_number": row.get("piece_no", ""),
                         "dispatch_mtr": row.get("finished_mtrs", ""),
                         "grey_mtrs": row.get("grey_mtrs", ""),
@@ -270,8 +283,13 @@ def parse_extraction_response(text: str, file_name: str, logs_dir: str = "") -> 
             for row in items:
                 if not isinstance(row, dict):
                     continue
+                s_no = row.get("s_no", row.get("sno", row.get("serial_no", row.get("S.No.", row.get("S No.", "")))))
+                # Only keep rows that have a printed S.No. from the document.
+                if s_no is None or str(s_no).strip() == "":
+                    continue
                 norm_items.append(
                     {
+                        "s_no": s_no,
                         "piece_number": row.get("piece_number", row.get("piece_no", "")),
                         "dispatch_mtr": row.get("dispatch_mtr", row.get("finished_mtrs", row.get("fin_mtrs", ""))),
                         "grey_mtrs": row.get("grey_mtrs", ""),
