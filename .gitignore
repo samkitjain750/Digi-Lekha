@@ -2,6 +2,7 @@
 config/api_key.json
 config/prior_year_pieces.json
 config/prior_year_pieces.xlsx
+config/dye_piece_master.sqlite
 .DS_Store
 __pycache__/
 *.pyc

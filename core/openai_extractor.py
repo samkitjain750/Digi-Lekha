@@ -116,14 +116,20 @@ For DELIVERY CHALLAN:
   If Grand Total is not on this page, leave both as empty string.
 - Never put the To/buyer name into company_name.
 - Extract row-wise ONLY for table rows that have a printed S.No. / S No. value:
-  s_no, piece_no, grey_mtrs, finished_mtrs, shrinkage_percent, flag, reason
+  s_no, quality, table_challan_no, piece_no, grey_mtrs, finished_mtrs, shrinkage_percent, flag, reason
 - s_no <- the number from the document's S.No. / S No. column (exact printed value, e.g. 59, 60, 91).
   Do NOT invent sequential numbers. If a row has no S.No., skip that row entirely.
+- quality <- Quality column value for the row, OR the nearest Quality / quality-name header above the row
+  (carry forward until the next quality header).
+- table_challan_no <- the table's Challan No. column for that ROW (grey/source challan).
+  This is NOT the header Challan No. (e.g. header may be 1022 while row Challan No. is 981).
 - Alias mapping:
   finished_mtrs <- Finished Mtrs/Finished Mtr/Dispatch Mtr/Dispatch Mtrs/Final Mtrs/Net Mtrs
   grey_mtrs <- Grey Mtrs/Grey Mtr/Grey
   piece_no <- Piece No/Invoice No/Lot No/Roll No
   s_no <- S.No./S No./SNo./Serial No
+  table_challan_no <- table Challan No./Challan No (row) — never header Challan No.
+  quality <- Quality/Quality Name/Item Quality
 - Rules:
   1) finished_mtrs < grey_mtrs
   2) shrinkage_percent = ((grey_mtrs - finished_mtrs)/grey_mtrs)*100
@@ -247,6 +253,11 @@ def parse_extraction_response(text: str, file_name: str, logs_dir: str = "") -> 
                 items.append(
                     {
                         "s_no": s_no,
+                        "quality": row.get("quality", row.get("quality_name", "")),
+                        "table_challan_no": row.get(
+                            "table_challan_no",
+                            row.get("challan_no_row", row.get("grey_challan_number", "")),
+                        ),
                         "piece_number": row.get("piece_no", ""),
                         "dispatch_mtr": row.get("finished_mtrs", ""),
                         "grey_mtrs": row.get("grey_mtrs", ""),
@@ -290,6 +301,14 @@ def parse_extraction_response(text: str, file_name: str, logs_dir: str = "") -> 
                 norm_items.append(
                     {
                         "s_no": s_no,
+                        "quality": row.get("quality", row.get("quality_name", "")),
+                        "table_challan_no": row.get(
+                            "table_challan_no",
+                            row.get(
+                                "challan_no_row",
+                                row.get("grey_challan_number", row.get("table_challan", "")),
+                            ),
+                        ),
                         "piece_number": row.get("piece_number", row.get("piece_no", "")),
                         "dispatch_mtr": row.get("dispatch_mtr", row.get("finished_mtrs", row.get("fin_mtrs", ""))),
                         "grey_mtrs": row.get("grey_mtrs", ""),

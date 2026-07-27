@@ -12,12 +12,15 @@ from .openai_extractor import extract_from_images, parse_extraction_response, ge
 from .excel_writer import (
     write_to_excel,
     build_challan_excel_filename,
+    write_piece_check_sheet,
+    _header_first,
 )
 from .totals_reconcile import (
     header_grand_totals,
     merge_header_totals,
     reconcile_challan_excel,
 )
+from .dye_master import get_master_stats, verify_items_against_master
 
 
 def ensure_directories(input_dir: str, output_dir: str, base_dir: str) -> tuple[str, str]:
@@ -373,6 +376,60 @@ def process_documents(
                             f"Totals reconciliation error for {os.path.basename(excel_path)}: {e}",
                             True,
                         )
+
+            # Dye master piece verification (after totals rewrite may have updated items).
+            try:
+                master_stats = get_master_stats()
+            except Exception:
+                master_stats = {"open": 0}
+            if master_stats.get("open", 0) > 0:
+                if status_callback:
+                    status_callback("Checking pieces against dye master...")
+                if log_callback:
+                    log_callback("--- Dye master piece check ---")
+                for excel_path, state in challan_states.items():
+                    try:
+                        header = state.get("header") or {}
+                        process_name = _header_first(
+                            header,
+                            "company_name",
+                            "supplier_name",
+                            "from_company",
+                            "mill_name",
+                        )
+                        if not process_name:
+                            # Fallback: parse from filename 1022_MANSAROVAR_INDUSTRIES.xlsx
+                            base = os.path.splitext(os.path.basename(excel_path))[0]
+                            parts = base.split("_", 1)
+                            process_name = parts[1].replace("_", " ") if len(parts) > 1 else ""
+                        items = state.get("items") or []
+                        check_rows, counts = verify_items_against_master(
+                            items,
+                            process_name=process_name,
+                            challan_file=excel_path,
+                            mark_on_ok=True,
+                        )
+                        write_piece_check_sheet(excel_path, check_rows)
+                        if log_callback:
+                            log_callback(
+                                f"Piece check {os.path.basename(excel_path)} "
+                                f"[{process_name}]: "
+                                f"OK={counts.get('OK', 0)}, "
+                                f"MISMATCH={counts.get('MISMATCH', 0)}, "
+                                f"NOT_FOUND={counts.get('NOT_FOUND', 0)}, "
+                                f"SKIPPED_TP={counts.get('SKIPPED_TP', 0)}"
+                            )
+                    except Exception as e:
+                        if log_callback:
+                            log_callback(
+                                f"Piece check error for {os.path.basename(excel_path)}: {e}",
+                                True,
+                            )
+            elif log_callback:
+                log_callback(
+                    "Dye master empty/open=0 — skipped Piece_Check "
+                    "(upload master in Settings)."
+                )
     finally:
         cleanup_temp_files(all_temp_images)
 

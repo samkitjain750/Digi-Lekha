@@ -24,6 +24,8 @@ DOC_COLUMNS = [
 
 ITEM_COLUMNS = [
     "Process PieceNo",
+    "Quality",
+    "Challan No.",
     "Grey Mtr",
     "Finish Mtr",
 ]
@@ -266,6 +268,8 @@ class ResultsPage(ctk.CTkFrame):
                         row.get("Piece No", row.get("piece_number", "")),
                     )
                 ),
+                str(row.get("Quality", row.get("quality", ""))),
+                str(row.get("Challan No.", row.get("table_challan_no", ""))),
                 str(
                     row.get(
                         "Grey Mtr",

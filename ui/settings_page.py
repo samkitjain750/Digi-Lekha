@@ -1,5 +1,6 @@
 """
-Extraction Settings page: toggles for challan fields + prior-year due pieces upload.
+Extraction Settings page: toggles for challan fields + prior-year due pieces
++ dye piece master upload.
 """
 import os
 import sys
@@ -18,6 +19,11 @@ from core.prior_pieces import (
     load_prior_pieces_meta,
     save_prior_pieces,
 )
+from core.dye_master import (
+    format_help_text as dye_format_help_text,
+    get_master_stats,
+    import_dye_master_excel,
+)
 
 WORKSPACE_BG = "#F8FAFC"
 BG_CARD = "#FFFFFF"
@@ -30,7 +36,7 @@ CHALLAN_TABLE_FIELDS = {
 
 
 class SettingsPage(ctk.CTkFrame):
-    """Extraction toggles + prior-year piece list upload. on_save(config) when user saves."""
+    """Extraction toggles + prior-year piece list + dye master upload."""
 
     def __init__(self, parent, base_dir: str, **kwargs):
         super().__init__(parent, fg_color=WORKSPACE_BG, **kwargs)
@@ -126,6 +132,75 @@ class SettingsPage(ctk.CTkFrame):
             command=self._upload_prior_pieces,
         ).pack(side="left")
 
+        # --- Dye piece master ---
+        dye_card = ctk.CTkFrame(inner, fg_color=BG_CARD, corner_radius=12)
+        dye_card.pack(fill="x", pady=(0, 16))
+        dye_inner = ctk.CTkFrame(dye_card, fg_color="transparent")
+        dye_inner.pack(fill="x", padx=24, pady=24)
+
+        dye_title = ctk.CTkFrame(dye_inner, fg_color="transparent")
+        dye_title.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            dye_title,
+            text="Dye piece master",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            dye_title,
+            text="?",
+            width=32,
+            height=28,
+            corner_radius=8,
+            fg_color="#64748B",
+            hover_color="#475569",
+            command=self._show_dye_format_help,
+        ).pack(side="left", padx=10)
+
+        ctk.CTkLabel(
+            dye_inner,
+            text=(
+                "Upload fabric sent-to-dye register (Process Name / Quality Name blocks). "
+                "Used to verify piece numbers on extracted challans. "
+                "Append daily; matched rows are soft-marked (not deleted)."
+            ),
+            font=ctk.CTkFont(size=13),
+            text_color="#64748B",
+            wraplength=640,
+            justify="left",
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 12))
+
+        self.dye_status = ctk.CTkLabel(
+            dye_inner,
+            text="",
+            font=ctk.CTkFont(size=13),
+            text_color="#334155",
+            anchor="w",
+            justify="left",
+        )
+        self.dye_status.pack(anchor="w", pady=(0, 12))
+        self._refresh_dye_status()
+
+        dye_btns = ctk.CTkFrame(dye_inner, fg_color="transparent")
+        dye_btns.pack(anchor="w")
+        ctk.CTkButton(
+            dye_btns,
+            text="Upload / Append Excel",
+            corner_radius=8,
+            height=36,
+            fg_color="#3B82F6",
+            command=lambda: self._upload_dye_master(replace=False),
+        ).pack(side="left")
+        ctk.CTkButton(
+            dye_btns,
+            text="Replace all",
+            corner_radius=8,
+            height=36,
+            fg_color="#EF4444",
+            hover_color="#DC2626",
+            command=lambda: self._upload_dye_master(replace=True),
+        ).pack(side="left", padx=10)
+
         btn_row = ctk.CTkFrame(inner, fg_color="transparent")
         btn_row.pack(anchor="w", pady=16)
         self.btn_save = ctk.CTkButton(
@@ -141,7 +216,6 @@ class SettingsPage(ctk.CTkFrame):
         meta = load_prior_pieces_meta()
         count = meta.get("count") or 0
         if count <= 0:
-            # Try seed via loader side-effect
             from core.prior_pieces import load_prior_piece_set
 
             load_prior_piece_set()
@@ -158,8 +232,33 @@ class SettingsPage(ctk.CTkFrame):
             text=f"Saved: {count} piece numbers\nSource: {src}\nUpdated: {updated}"
         )
 
+    def _refresh_dye_status(self):
+        try:
+            stats = get_master_stats()
+        except Exception:
+            stats = {"total": 0, "open": 0, "matched": 0, "last_import": "", "source_file": ""}
+        if not stats.get("total"):
+            self.dye_status.configure(
+                text="No dye master loaded yet. Upload the historical Excel once, then append daily."
+            )
+            return
+        self.dye_status.configure(
+            text=(
+                f"Total: {stats['total']}  |  Open: {stats['open']}  |  Matched: {stats['matched']}\n"
+                f"Last import: {stats.get('last_import') or '-'}\n"
+                f"Source: {stats.get('source_file') or '-'}"
+            )
+        )
+
     def _show_format_help(self):
         messagebox.showinfo("Excel format", format_help_text(), parent=self.winfo_toplevel())
+
+    def _show_dye_format_help(self):
+        messagebox.showinfo(
+            "Dye master Excel format",
+            dye_format_help_text(),
+            parent=self.winfo_toplevel(),
+        )
 
     def _upload_prior_pieces(self):
         path = filedialog.askopenfilename(
@@ -182,6 +281,54 @@ class SettingsPage(ctk.CTkFrame):
                 "List saved",
                 f"Imported {meta['count']} piece numbers from column “{col_name}”.\n"
                 "This list is saved for future extractions.",
+                parent=self.winfo_toplevel(),
+            )
+        except ValueError as e:
+            messagebox.showerror(
+                "Wrong Excel format",
+                str(e),
+                parent=self.winfo_toplevel(),
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Upload failed",
+                f"Could not import the file.\n{e}",
+                parent=self.winfo_toplevel(),
+            )
+
+    def _upload_dye_master(self, *, replace: bool):
+        if replace:
+            ok = messagebox.askyesno(
+                "Replace dye master?",
+                "This will DELETE all existing dye master rows (open and matched),\n"
+                "then import the selected Excel.\n\nContinue?",
+                parent=self.winfo_toplevel(),
+            )
+            if not ok:
+                return
+        path = filedialog.askopenfilename(
+            parent=self.winfo_toplevel(),
+            title="Select dye piece master Excel",
+            filetypes=[
+                ("Excel files", "*.xlsx *.xls"),
+                ("Excel (xlsx)", "*.xlsx"),
+                ("Excel (xls)", "*.xls"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            stats = import_dye_master_excel(path, replace=replace)
+            self._refresh_dye_status()
+            action = "Replaced and imported" if replace else "Appended"
+            messagebox.showinfo(
+                "Dye master updated",
+                f"{action} {stats.get('inserted', 0)} new rows "
+                f"(parsed {stats.get('parsed', 0)}, "
+                f"skipped duplicates {stats.get('skipped_duplicates', 0)}).\n\n"
+                f"Open: {stats.get('open', 0)}  |  Matched: {stats.get('matched', 0)}  |  "
+                f"Total: {stats.get('total', 0)}",
                 parent=self.winfo_toplevel(),
             )
         except ValueError as e:

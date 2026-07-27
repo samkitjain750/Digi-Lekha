@@ -178,8 +178,14 @@ def _normalize_item_row(item: dict, file_name: str) -> dict:
         "grey_challan_number": v("grey_challan_number"),
         "beam": v("beam"),
         "s_no": item.get("s_no", item.get("sno", item.get("serial_no", ""))),
+        "quality": v("quality") or v("quality_name"),
+        "table_challan_no": v("table_challan_no")
+        or v("challan_no_row")
+        or v("grey_challan_number"),
         "flag": bool(item.get("flag", False)),
         "reason": v("reason"),
+        "piece_has_tp": "TP" in str(item.get("piece_number", item.get("piece_no", "")) or "").upper()
+        or "TP" in str(item.get("reason", "") or "").upper(),
     }
     return row
 
@@ -225,9 +231,12 @@ ITEM_STATIC_COLS = []
 
 # Export headers required by challan import format.
 EXPORT_PIECE_COL = "Process PieceNo"
+EXPORT_QUALITY_COL = "Quality"
+EXPORT_TABLE_CHALLAN_COL = "Challan No."
 EXPORT_GREY_COL = "Grey Mtr"
 EXPORT_MTR_COL = "Finish Mtr"
 ITEMS_SHEET_NAME = "Sheet1"
+PIECE_CHECK_SHEET_NAME = "Piece_Check"
 
 # Piece-number characters that should flag a validation row red.
 _PIECE_FLAG_CHARS = set("IJLOQVW")
@@ -289,14 +298,18 @@ def get_item_columns(config: dict) -> list:
     out = []
     if "piece_number" in selected:
         out.append(EXPORT_PIECE_COL)
+    # Always include Quality + table Challan No. for dye-master verification.
+    out.append(EXPORT_QUALITY_COL)
+    out.append(EXPORT_TABLE_CHALLAN_COL)
     if "grey_mtrs" in selected:
         out.append(EXPORT_GREY_COL)
     if "dispatch_mtr" in selected:
         out.append(EXPORT_MTR_COL)
-    # Always keep Grey Mtr between piece and finish when piece+finish are present.
+    # Always keep Grey Mtr between piece/challan and finish when piece+finish are present.
     if EXPORT_PIECE_COL in out and EXPORT_MTR_COL in out and EXPORT_GREY_COL not in out:
-        piece_idx = out.index(EXPORT_PIECE_COL)
-        out.insert(piece_idx + 1, EXPORT_GREY_COL)
+        # insert grey before finish
+        fin_idx = out.index(EXPORT_MTR_COL)
+        out.insert(fin_idx, EXPORT_GREY_COL)
     return ITEM_STATIC_COLS + out
 
 
@@ -452,6 +465,10 @@ def _build_sheet1_and_validation(
         if EXPORT_PIECE_COL in item_cols:
             piece = _strip_tp_from_piece(r.get("piece_number", ""))
             row[EXPORT_PIECE_COL] = apply_prior_year_dash(piece, prior_set)
+        if EXPORT_QUALITY_COL in item_cols:
+            row[EXPORT_QUALITY_COL] = str(r.get("quality", "") or "").strip()
+        if EXPORT_TABLE_CHALLAN_COL in item_cols:
+            row[EXPORT_TABLE_CHALLAN_COL] = str(r.get("table_challan_no", "") or "").strip()
         if EXPORT_GREY_COL in item_cols:
             row[EXPORT_GREY_COL] = _excel_number(r.get("grey_mtrs", ""))
         if EXPORT_MTR_COL in item_cols:
@@ -512,6 +529,31 @@ def rewrite_challan_excel(
             _apply_numeric_cell_types(ws_v, VALIDATION_NUMERIC_HEADERS)
             _apply_left_alignment(ws_v)
     return True
+
+
+def write_piece_check_sheet(output_file: str, check_rows: list[dict]) -> None:
+    """Create/replace Piece_Check sheet on an existing challan workbook."""
+    from core.dye_master import PIECE_CHECK_COLUMNS
+    from openpyxl import load_workbook
+
+    if not output_file or not os.path.exists(output_file):
+        return
+    wb = load_workbook(output_file)
+    if PIECE_CHECK_SHEET_NAME in wb.sheetnames:
+        del wb[PIECE_CHECK_SHEET_NAME]
+    ws = wb.create_sheet(PIECE_CHECK_SHEET_NAME)
+    for col_idx, name in enumerate(PIECE_CHECK_COLUMNS, start=1):
+        ws.cell(row=1, column=col_idx, value=name)
+    red_fill = PatternFill(start_color="FDECEC", end_color="FDECEC", fill_type="solid")
+    for row_idx, row in enumerate(check_rows or [], start=2):
+        status = str((row or {}).get("Status", "") or "")
+        for col_idx, name in enumerate(PIECE_CHECK_COLUMNS, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=(row or {}).get(name))
+            if status and status != "OK":
+                cell.fill = red_fill
+    _apply_left_alignment(ws)
+    wb.save(output_file)
+    wb.close()
 
 
 def write_to_excel(
