@@ -89,13 +89,14 @@ build_win.bat
 - **Settings:** Extraction settings and API key are stored in that same writable config area when running the packaged app.
 - **Input/Output folders:** Default locations are under the same Application Support (or AppData) folder so the app does not need write access next to the executable.
 
-### Dye piece master (piece verification)
+### Master Data (piece verification + dash)
 
-1. **Settings → Dye piece master → Upload / Append Excel** — import the historical sent-to-dye register once (Process Name / Quality Name blocks).
+1. **Settings → Master Data → Upload / Append Excel** — import `Master Data.xls` once (Process Name / Quality Name blocks).
 2. Daily: export only **new** rows and **Append** (do not Replace unless you intend a full reset).
 3. Process challans as usual. Output Excel gets a **Piece_Check** sheet (OK / MISMATCH / NOT_FOUND / SKIPPED_TP).
 4. Matched master rows are soft-marked `matched` (not deleted). Outstanding at dye = `open` count in Settings.
-5. Sheet1 also stores **Quality** and table **Challan No.** (grey challan — not the dye header challan in the filename).
+5. Sheet1 columns: **Process PieceNo**, **Grey Mtr**, **Finish Mtr**. Piece numbers keep `-` **exactly as in Master Data**. Quality / table Challan No. are used only for Piece_Check (not written to Sheet1).
+6. **Export open pieces** from Settings for outstanding-at-dye stock. **Reset matched → open** reopens soft-matched rows without deleting.
 
 ---
 

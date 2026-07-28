@@ -62,8 +62,11 @@ def normalize_grey(value: Any) -> float | None:
 
 
 def _strip_tp(piece: str) -> str:
+    """Remove TP markers for matching keys (not for display/export)."""
     s = str(piece or "")
     s = re.sub(r"[\(\[\{]\s*TP\s*[\)\]\}]", "", s, flags=re.IGNORECASE)
+    # Common master form: 276H-TP / 4486ZS-TP
+    s = re.sub(r"[-\s]*TP\b", "", s, flags=re.IGNORECASE)
     out = []
     i = 0
     while i < len(s):
@@ -72,20 +75,20 @@ def _strip_tp(piece: str) -> str:
             continue
         out.append(s[i])
         i += 1
-    return "".join(out).strip()
+    return "".join(out).strip().rstrip("-").strip()
 
 
 def normalize_piece_key(piece: Any) -> str:
     s = _strip_tp(str(piece or "").strip())
     s = s.lstrip("-").strip()
     s = re.sub(r"-\d+$", "", s)
+    s = s.rstrip("-").strip()
     return s.upper()
 
 
 def piece_display(piece: Any) -> str:
-    s = _strip_tp(str(piece or "").strip())
-    s = s.lstrip("-").strip()
-    return s
+    """Display/export form: keep leading '-' and TP exactly as in the master Excel."""
+    return str(piece or "").strip()
 
 
 _PIECE_RE = re.compile(r"^(\d+)(.*)$")
@@ -194,6 +197,79 @@ def clear_all_master() -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM dye_pieces")
         conn.commit()
+
+
+def reset_matched_to_open() -> int:
+    """
+    Re-open all matched rows so they can match again.
+    Does not delete data. Returns number of rows reset.
+    """
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE dye_pieces
+            SET status=?, matched_at=NULL, matched_challan_file=NULL,
+                matched_s_no=NULL, matched_ocr_piece=NULL
+            WHERE status=?
+            """,
+            (STATUS_OPEN, STATUS_MATCHED),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+
+
+def export_master_excel(file_path: str, *, status: str | None = "open") -> dict:
+    """
+    Export master rows to Excel for stock / audit.
+    status: 'open' | 'matched' | None (all).
+    Returns {"exported": n, "path": file_path}.
+    """
+    import pandas as pd
+
+    if not file_path:
+        raise ValueError("Save path is required.")
+    init_db()
+    sql = """
+        SELECT process_name AS "Process Name",
+               quality_name AS "Quality",
+               challan_no AS "Challan No.",
+               piece_no_display AS "Piece No.",
+               grey_mtrs AS "Grey Mtrs",
+               date AS "Date",
+               status AS "Status",
+               matched_at AS "Matched At",
+               matched_challan_file AS "Matched Challan File",
+               source_file AS "Source File"
+        FROM dye_pieces
+    """
+    params: list = []
+    if status in (STATUS_OPEN, STATUS_MATCHED):
+        sql += " WHERE status=?"
+        params.append(status)
+    sql += " ORDER BY process_name, quality_name, challan_no, piece_no"
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    data = [dict(r) for r in rows]
+    df = pd.DataFrame(data)
+    if df.empty:
+        df = pd.DataFrame(
+            columns=[
+                "Process Name",
+                "Quality",
+                "Challan No.",
+                "Piece No.",
+                "Grey Mtrs",
+                "Date",
+                "Status",
+                "Matched At",
+                "Matched Challan File",
+                "Source File",
+            ]
+        )
+    os.makedirs(os.path.dirname(os.path.abspath(file_path)) or ".", exist_ok=True)
+    df.to_excel(file_path, index=False, engine="openpyxl")
+    return {"exported": len(data), "path": file_path}
 
 
 def parse_dye_master_excel(file_path: str) -> list[dict]:
@@ -565,10 +641,9 @@ def verify_items_against_master(
 
 def format_help_text() -> str:
     return (
-        "Dye piece master — Excel format\n"
-        "================================\n\n"
-        "Upload the fabric-sent-to-dye register (.xlsx or .xls).\n\n"
-        "Layout (block style):\n"
+        "Master Data — Excel format\n"
+        "==========================\n\n"
+        "Upload Master Data.xls (or .xlsx) in this block layout:\n\n"
         "  Process Name : MANSAROVAR INDUSTRIES\n"
         "  Quality Name : CLASS MATE (DIMOND)\n"
         "  SNo. | Date | Challan No. | Piece No. | Grey Mtrs | ...\n"
@@ -576,10 +651,15 @@ def format_help_text() -> str:
         "  Quality Total >>  (skipped)\n"
         "  Quality Name : NEXT QUALITY\n"
         "  ...\n\n"
+        "This single file is used for:\n"
+        "  • Piece_Check verification (Process + Quality + Challan No. + Grey + Piece)\n"
+        "  • Sheet1 '-' display — kept exactly as in Master Data\n"
+        "    (with '-' if master has '-', without if it does not)\n\n"
         "Notes:\n"
-        "  • Process Name = dye house / mill (e.g. MANSAROVAR INDUSTRIES)\n"
-        "  • Challan No. = grey/table challan (NOT dye header challan like 1022)\n"
-        "  • Use Upload/Append daily for new rows; history is kept\n"
+        "  • Process Name = dye house / mill\n"
+        "  • Challan No. = grey/table challan (NOT dye header like 1022)\n"
+        "  • Upload / Append for daily new rows; Replace all only for a full reset\n"
         "  • Matched pieces are soft-marked (not deleted)\n"
-        "  • Outstanding at dye = status open\n"
+        "  • Export Open = pieces still outstanding at dye\n"
+        "  • Reset matched = mark all matched rows open again (no delete)\n"
     )

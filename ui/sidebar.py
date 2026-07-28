@@ -11,7 +11,6 @@ NAV_ITEMS = [
     ("documents", "Documents", "📄"),
     ("logs", "Processing Logs", "📋"),
     ("results", "Export Results", "📤"),
-    ("invoice_results", "Invoice Results", "🧾"),
 ]
 BOTTOM_ITEMS = [
     ("settings", "Settings", "⚙️"),

@@ -135,7 +135,8 @@ For DELIVERY CHALLAN:
   2) shrinkage_percent = ((grey_mtrs - finished_mtrs)/grey_mtrs)*100
   3) normal shrinkage range 2%-10%, outside => flag true
   4) unclear text or column shift => flag true
-  5) confusion I/J, O/0, S/5, B/8 => flag true
+  5) If a value is genuinely unclear / unreadable, set flag true with reason.
+     Do NOT flag a row merely because the piece number contains letters I, J, L, O, Q, V, or W.
 - Do NOT invent rows from other challans.
 - Skip rows without S.No., quality-name headers, quality-total, grand-total, and summary-only rows
   (unless that summary row itself has an S.No. in the S.No. column).

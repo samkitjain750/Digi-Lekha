@@ -384,9 +384,9 @@ def process_documents(
                 master_stats = {"open": 0}
             if master_stats.get("open", 0) > 0:
                 if status_callback:
-                    status_callback("Checking pieces against dye master...")
+                    status_callback("Checking pieces against Master Data...")
                 if log_callback:
-                    log_callback("--- Dye master piece check ---")
+                    log_callback("--- Master Data piece check ---")
                 for excel_path, state in challan_states.items():
                     try:
                         header = state.get("header") or {}
@@ -427,8 +427,8 @@ def process_documents(
                             )
             elif log_callback:
                 log_callback(
-                    "Dye master empty/open=0 — skipped Piece_Check "
-                    "(upload master in Settings)."
+                    "Master Data empty/open=0 — skipped Piece_Check "
+                    "(upload Master Data.xls in Settings)."
                 )
     finally:
         cleanup_temp_files(all_temp_images)

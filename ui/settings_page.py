@@ -1,6 +1,6 @@
 """
-Extraction Settings page: toggles for challan fields + prior-year due pieces
-+ dye piece master upload.
+Settings: Sheet1 column toggles, Master Data, and OpenAI API key.
+Master Data.xls drives Piece_Check verification and Sheet1 '-' display.
 """
 import os
 import sys
@@ -13,20 +13,22 @@ if __name__ != "__main__":
 
 import customtkinter as ctk
 from core.config_loader import load_config, save_config, DEFAULT_CONFIG
-from core.prior_pieces import (
-    extract_pieces_from_excel,
-    format_help_text,
-    load_prior_pieces_meta,
-    save_prior_pieces,
-)
 from core.dye_master import (
-    format_help_text as dye_format_help_text,
+    export_master_excel,
+    format_help_text as master_format_help_text,
     get_master_stats,
     import_dye_master_excel,
+    reset_matched_to_open,
+)
+from core.openai_extractor import (
+    get_openai_api_key,
+    get_openai_model,
+    save_openai_api_key,
 )
 
 WORKSPACE_BG = "#F8FAFC"
 BG_CARD = "#FFFFFF"
+PRIMARY = "#3B82F6"
 
 CHALLAN_TABLE_FIELDS = {
     "piece_number": "Piece No",
@@ -35,8 +37,17 @@ CHALLAN_TABLE_FIELDS = {
 }
 
 
+def _mask_api_key(key: str) -> str:
+    key = (key or "").strip()
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "••••" + key[-2:]
+    return key[:4] + "••••••••" + key[-4:]
+
+
 class SettingsPage(ctk.CTkFrame):
-    """Extraction toggles + prior-year piece list + dye master upload."""
+    """Sheet1 columns, Master Data, and API key."""
 
     def __init__(self, parent, base_dir: str, **kwargs):
         super().__init__(parent, fg_color=WORKSPACE_BG, **kwargs)
@@ -52,154 +63,12 @@ class SettingsPage(ctk.CTkFrame):
         inner = ctk.CTkScrollableFrame(self, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=32, pady=32)
         ctk.CTkLabel(
-            inner, text="Extraction Settings", font=ctk.CTkFont(size=24, weight="bold")
+            inner, text="Settings", font=ctk.CTkFont(size=24, weight="bold")
         ).pack(anchor="w", pady=(0, 24))
 
-        def add_section(title: str, field_labels: dict, config_key: str):
-            card = ctk.CTkFrame(inner, fg_color=BG_CARD, corner_radius=12)
-            card.pack(fill="x", pady=(0, 16))
-            card_inner = ctk.CTkFrame(card, fg_color="transparent")
-            card_inner.pack(fill="x", padx=24, pady=24)
-            ctk.CTkLabel(
-                card_inner, text=title, font=ctk.CTkFont(size=16, weight="bold")
-            ).pack(anchor="w", pady=(0, 12))
-            selected = set(self.config.get(config_key, []))
-            for key, label in field_labels.items():
-                var = ctk.BooleanVar(value=key in selected)
-                sw = ctk.CTkSwitch(card_inner, text=label, variable=var)
-                sw.pack(anchor="w", pady=4)
-                self._switches[(config_key, key)] = var
-
-        add_section("Delivery challan table fields", CHALLAN_TABLE_FIELDS, "challan_table_fields")
-
-        # --- Prior-year due pieces ---
-        prior_card = ctk.CTkFrame(inner, fg_color=BG_CARD, corner_radius=12)
-        prior_card.pack(fill="x", pady=(0, 16))
-        prior_inner = ctk.CTkFrame(prior_card, fg_color="transparent")
-        prior_inner.pack(fill="x", padx=24, pady=24)
-
-        title_row = ctk.CTkFrame(prior_inner, fg_color="transparent")
-        title_row.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(
-            title_row,
-            text="Last-year due pieces",
-            font=ctk.CTkFont(size=16, weight="bold"),
-        ).pack(side="left")
-        self.btn_format_help = ctk.CTkButton(
-            title_row,
-            text="?",
-            width=32,
-            height=28,
-            corner_radius=8,
-            fg_color="#64748B",
-            hover_color="#475569",
-            command=self._show_format_help,
-        )
-        self.btn_format_help.pack(side="left", padx=10)
-
-        ctk.CTkLabel(
-            prior_inner,
-            text=(
-                "Upload an Excel list of piece numbers that were sent last year "
-                "and may return this year. Matching pieces get a '-' prefix on Sheet1."
-            ),
-            font=ctk.CTkFont(size=13),
-            text_color="#64748B",
-            wraplength=640,
-            justify="left",
-            anchor="w",
-        ).pack(anchor="w", pady=(0, 12))
-
-        self.prior_status = ctk.CTkLabel(
-            prior_inner,
-            text="",
-            font=ctk.CTkFont(size=13),
-            text_color="#334155",
-            anchor="w",
-            justify="left",
-        )
-        self.prior_status.pack(anchor="w", pady=(0, 12))
-        self._refresh_prior_status()
-
-        btn_row_prior = ctk.CTkFrame(prior_inner, fg_color="transparent")
-        btn_row_prior.pack(anchor="w")
-        ctk.CTkButton(
-            btn_row_prior,
-            text="Upload piece list Excel",
-            corner_radius=8,
-            height=36,
-            fg_color="#3B82F6",
-            command=self._upload_prior_pieces,
-        ).pack(side="left")
-
-        # --- Dye piece master ---
-        dye_card = ctk.CTkFrame(inner, fg_color=BG_CARD, corner_radius=12)
-        dye_card.pack(fill="x", pady=(0, 16))
-        dye_inner = ctk.CTkFrame(dye_card, fg_color="transparent")
-        dye_inner.pack(fill="x", padx=24, pady=24)
-
-        dye_title = ctk.CTkFrame(dye_inner, fg_color="transparent")
-        dye_title.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(
-            dye_title,
-            text="Dye piece master",
-            font=ctk.CTkFont(size=16, weight="bold"),
-        ).pack(side="left")
-        ctk.CTkButton(
-            dye_title,
-            text="?",
-            width=32,
-            height=28,
-            corner_radius=8,
-            fg_color="#64748B",
-            hover_color="#475569",
-            command=self._show_dye_format_help,
-        ).pack(side="left", padx=10)
-
-        ctk.CTkLabel(
-            dye_inner,
-            text=(
-                "Upload fabric sent-to-dye register (Process Name / Quality Name blocks). "
-                "Used to verify piece numbers on extracted challans. "
-                "Append daily; matched rows are soft-marked (not deleted)."
-            ),
-            font=ctk.CTkFont(size=13),
-            text_color="#64748B",
-            wraplength=640,
-            justify="left",
-            anchor="w",
-        ).pack(anchor="w", pady=(0, 12))
-
-        self.dye_status = ctk.CTkLabel(
-            dye_inner,
-            text="",
-            font=ctk.CTkFont(size=13),
-            text_color="#334155",
-            anchor="w",
-            justify="left",
-        )
-        self.dye_status.pack(anchor="w", pady=(0, 12))
-        self._refresh_dye_status()
-
-        dye_btns = ctk.CTkFrame(dye_inner, fg_color="transparent")
-        dye_btns.pack(anchor="w")
-        ctk.CTkButton(
-            dye_btns,
-            text="Upload / Append Excel",
-            corner_radius=8,
-            height=36,
-            fg_color="#3B82F6",
-            command=lambda: self._upload_dye_master(replace=False),
-        ).pack(side="left")
-        ctk.CTkButton(
-            dye_btns,
-            text="Replace all",
-            corner_radius=8,
-            height=36,
-            fg_color="#EF4444",
-            hover_color="#DC2626",
-            command=lambda: self._upload_dye_master(replace=True),
-        ).pack(side="left", padx=10)
+        self._build_api_section(inner)
+        self._build_sheet1_section(inner)
+        self._build_master_section(inner)
 
         btn_row = ctk.CTkFrame(inner, fg_color="transparent")
         btn_row.pack(anchor="w", pady=16)
@@ -212,37 +81,239 @@ class SettingsPage(ctk.CTkFrame):
         )
         self.save_message.pack(side="left", padx=16)
 
-    def _refresh_prior_status(self):
-        meta = load_prior_pieces_meta()
-        count = meta.get("count") or 0
-        if count <= 0:
-            from core.prior_pieces import load_prior_piece_set
+    def _card(self, parent) -> ctk.CTkFrame:
+        card = ctk.CTkFrame(parent, fg_color=BG_CARD, corner_radius=12)
+        card.pack(fill="x", pady=(0, 16))
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=24, pady=24)
+        return inner
 
-            load_prior_piece_set()
-            meta = load_prior_pieces_meta()
-            count = meta.get("count") or 0
-        if count <= 0:
-            self.prior_status.configure(
-                text="No list saved yet. Upload an Excel file with piece numbers."
+    def _build_api_section(self, parent):
+        inner = self._card(parent)
+        ctk.CTkLabel(
+            inner, text="OpenAI API", font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(anchor="w", pady=(0, 8))
+        ctk.CTkLabel(
+            inner,
+            text="Required for challan extraction. Stored only on this computer.",
+            font=ctk.CTkFont(size=13),
+            text_color="#64748B",
+            wraplength=640,
+            justify="left",
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 12))
+
+        self.api_status = ctk.CTkLabel(
+            inner,
+            text="",
+            font=ctk.CTkFont(size=13),
+            text_color="#334155",
+            anchor="w",
+            justify="left",
+        )
+        self.api_status.pack(anchor="w", pady=(0, 8))
+
+        self.api_entry = ctk.CTkEntry(
+            inner,
+            placeholder_text="Paste a new API key to update",
+            height=36,
+            corner_radius=8,
+            show="•",
+        )
+        self.api_entry.pack(fill="x", pady=(0, 10))
+
+        btns = ctk.CTkFrame(inner, fg_color="transparent")
+        btns.pack(anchor="w")
+        ctk.CTkButton(
+            btns,
+            text="Save API key",
+            corner_radius=8,
+            height=36,
+            fg_color=PRIMARY,
+            command=self._save_api_key,
+        ).pack(side="left")
+        ctk.CTkButton(
+            btns,
+            text="Clear field",
+            corner_radius=8,
+            height=36,
+            fg_color="#64748B",
+            hover_color="#475569",
+            command=lambda: self.api_entry.delete(0, "end"),
+        ).pack(side="left", padx=10)
+        self._refresh_api_status()
+
+    def _build_sheet1_section(self, parent):
+        inner = self._card(parent)
+        ctk.CTkLabel(
+            inner,
+            text="Sheet1 columns",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(anchor="w", pady=(0, 8))
+        ctk.CTkLabel(
+            inner,
+            text="Choose which columns appear on Sheet1. Quality and Challan No. "
+            "are used for Piece_Check only and are not exported.",
+            font=ctk.CTkFont(size=13),
+            text_color="#64748B",
+            wraplength=640,
+            justify="left",
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 12))
+
+        selected = set(self.config.get("challan_table_fields", []))
+        for key, label in CHALLAN_TABLE_FIELDS.items():
+            var = ctk.BooleanVar(value=key in selected)
+            sw = ctk.CTkSwitch(inner, text=label, variable=var)
+            sw.pack(anchor="w", pady=4)
+            self._switches[("challan_table_fields", key)] = var
+
+    def _build_master_section(self, parent):
+        inner = self._card(parent)
+
+        title_row = ctk.CTkFrame(inner, fg_color="transparent")
+        title_row.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            title_row,
+            text="Master Data",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            title_row,
+            text="?",
+            width=32,
+            height=28,
+            corner_radius=8,
+            fg_color="#64748B",
+            hover_color="#475569",
+            command=self._show_master_format_help,
+        ).pack(side="left", padx=10)
+
+        ctk.CTkLabel(
+            inner,
+            text=(
+                "Upload Master Data.xls (Process Name / Quality Name blocks). "
+                "One file verifies piece numbers and sets '-' on Sheet1 "
+                "exactly as stored in Master Data."
+            ),
+            font=ctk.CTkFont(size=13),
+            text_color="#64748B",
+            wraplength=640,
+            justify="left",
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 12))
+
+        self.master_status = ctk.CTkLabel(
+            inner,
+            text="",
+            font=ctk.CTkFont(size=13),
+            text_color="#334155",
+            anchor="w",
+            justify="left",
+        )
+        self.master_status.pack(anchor="w", pady=(0, 12))
+        self._refresh_master_status()
+
+        btns = ctk.CTkFrame(inner, fg_color="transparent")
+        btns.pack(anchor="w")
+        ctk.CTkButton(
+            btns,
+            text="Upload / Append Excel",
+            corner_radius=8,
+            height=36,
+            fg_color=PRIMARY,
+            command=lambda: self._upload_master(replace=False),
+        ).pack(side="left")
+        ctk.CTkButton(
+            btns,
+            text="Replace all",
+            corner_radius=8,
+            height=36,
+            fg_color="#EF4444",
+            hover_color="#DC2626",
+            command=lambda: self._upload_master(replace=True),
+        ).pack(side="left", padx=10)
+
+        btns2 = ctk.CTkFrame(inner, fg_color="transparent")
+        btns2.pack(anchor="w", pady=(10, 0))
+        ctk.CTkButton(
+            btns2,
+            text="Export open pieces",
+            corner_radius=8,
+            height=36,
+            fg_color="#0F766E",
+            hover_color="#0D9488",
+            command=lambda: self._export_master(status="open"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            btns2,
+            text="Export all",
+            corner_radius=8,
+            height=36,
+            fg_color="#475569",
+            hover_color="#334155",
+            command=lambda: self._export_master(status=None),
+        ).pack(side="left", padx=10)
+        ctk.CTkButton(
+            btns2,
+            text="Reset matched → open",
+            corner_radius=8,
+            height=36,
+            fg_color="#D97706",
+            hover_color="#B45309",
+            command=self._reset_matched,
+        ).pack(side="left")
+
+    def _refresh_api_status(self):
+        key = get_openai_api_key(self.base_dir)
+        model = get_openai_model(self.base_dir)
+        if key:
+            self.api_status.configure(
+                text=f"Key: {_mask_api_key(key)}  |  Model: {model}",
+                text_color="#334155",
+            )
+        else:
+            self.api_status.configure(
+                text=f"No API key saved.  |  Model: {model}",
+                text_color="#DC2626",
+            )
+
+    def _save_api_key(self):
+        key = (self.api_entry.get() or "").strip()
+        if not key:
+            messagebox.showwarning(
+                "API key",
+                "Paste an API key in the field first.",
+                parent=self.winfo_toplevel(),
             )
             return
-        src = meta.get("source_file") or "saved list"
-        updated = meta.get("updated_at") or "-"
-        self.prior_status.configure(
-            text=f"Saved: {count} piece numbers\nSource: {src}\nUpdated: {updated}"
-        )
+        try:
+            save_openai_api_key(key)
+            self.api_entry.delete(0, "end")
+            self._refresh_api_status()
+            messagebox.showinfo(
+                "API key saved",
+                "OpenAI API key updated for this computer.",
+                parent=self.winfo_toplevel(),
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Save failed",
+                f"Could not save API key.\n{e}",
+                parent=self.winfo_toplevel(),
+            )
 
-    def _refresh_dye_status(self):
+    def _refresh_master_status(self):
         try:
             stats = get_master_stats()
         except Exception:
             stats = {"total": 0, "open": 0, "matched": 0, "last_import": "", "source_file": ""}
         if not stats.get("total"):
-            self.dye_status.configure(
-                text="No dye master loaded yet. Upload the historical Excel once, then append daily."
+            self.master_status.configure(
+                text="No Master Data loaded yet. Upload Master Data.xls once, then append daily."
             )
             return
-        self.dye_status.configure(
+        self.master_status.configure(
             text=(
                 f"Total: {stats['total']}  |  Open: {stats['open']}  |  Matched: {stats['matched']}\n"
                 f"Last import: {stats.get('last_import') or '-'}\n"
@@ -250,57 +321,18 @@ class SettingsPage(ctk.CTkFrame):
             )
         )
 
-    def _show_format_help(self):
-        messagebox.showinfo("Excel format", format_help_text(), parent=self.winfo_toplevel())
-
-    def _show_dye_format_help(self):
+    def _show_master_format_help(self):
         messagebox.showinfo(
-            "Dye master Excel format",
-            dye_format_help_text(),
+            "Master Data Excel format",
+            master_format_help_text(),
             parent=self.winfo_toplevel(),
         )
 
-    def _upload_prior_pieces(self):
-        path = filedialog.askopenfilename(
-            parent=self.winfo_toplevel(),
-            title="Select prior-year piece numbers Excel",
-            filetypes=[
-                ("Excel files", "*.xlsx *.xls"),
-                ("Excel (xlsx)", "*.xlsx"),
-                ("Excel (xls)", "*.xls"),
-                ("All files", "*.*"),
-            ],
-        )
-        if not path:
-            return
-        try:
-            pieces, col_name = extract_pieces_from_excel(path)
-            meta = save_prior_pieces(pieces, source_file=path)
-            self._refresh_prior_status()
-            messagebox.showinfo(
-                "List saved",
-                f"Imported {meta['count']} piece numbers from column “{col_name}”.\n"
-                "This list is saved for future extractions.",
-                parent=self.winfo_toplevel(),
-            )
-        except ValueError as e:
-            messagebox.showerror(
-                "Wrong Excel format",
-                str(e),
-                parent=self.winfo_toplevel(),
-            )
-        except Exception as e:
-            messagebox.showerror(
-                "Upload failed",
-                f"Could not import the file.\n{e}",
-                parent=self.winfo_toplevel(),
-            )
-
-    def _upload_dye_master(self, *, replace: bool):
+    def _upload_master(self, *, replace: bool):
         if replace:
             ok = messagebox.askyesno(
-                "Replace dye master?",
-                "This will DELETE all existing dye master rows (open and matched),\n"
+                "Replace Master Data?",
+                "This will DELETE all existing Master Data rows (open and matched),\n"
                 "then import the selected Excel.\n\nContinue?",
                 parent=self.winfo_toplevel(),
             )
@@ -308,7 +340,7 @@ class SettingsPage(ctk.CTkFrame):
                 return
         path = filedialog.askopenfilename(
             parent=self.winfo_toplevel(),
-            title="Select dye piece master Excel",
+            title="Select Master Data Excel",
             filetypes=[
                 ("Excel files", "*.xlsx *.xls"),
                 ("Excel (xlsx)", "*.xlsx"),
@@ -320,10 +352,10 @@ class SettingsPage(ctk.CTkFrame):
             return
         try:
             stats = import_dye_master_excel(path, replace=replace)
-            self._refresh_dye_status()
+            self._refresh_master_status()
             action = "Replaced and imported" if replace else "Appended"
             messagebox.showinfo(
-                "Dye master updated",
+                "Master Data updated",
                 f"{action} {stats.get('inserted', 0)} new rows "
                 f"(parsed {stats.get('parsed', 0)}, "
                 f"skipped duplicates {stats.get('skipped_duplicates', 0)}).\n\n"
@@ -341,6 +373,85 @@ class SettingsPage(ctk.CTkFrame):
             messagebox.showerror(
                 "Upload failed",
                 f"Could not import the file.\n{e}",
+                parent=self.winfo_toplevel(),
+            )
+
+    def _export_master(self, *, status: str | None):
+        try:
+            stats = get_master_stats()
+        except Exception:
+            stats = {"total": 0, "open": 0}
+        if status == "open" and not stats.get("open"):
+            messagebox.showinfo(
+                "Nothing to export",
+                "There are no open pieces in Master Data.",
+                parent=self.winfo_toplevel(),
+            )
+            return
+        if status is None and not stats.get("total"):
+            messagebox.showinfo(
+                "Nothing to export",
+                "Master Data is empty. Upload Master Data.xls first.",
+                parent=self.winfo_toplevel(),
+            )
+            return
+        label = "open" if status == "open" else "all"
+        path = filedialog.asksaveasfilename(
+            parent=self.winfo_toplevel(),
+            title=f"Export Master Data ({label})",
+            defaultextension=".xlsx",
+            initialfile=f"Master_Data_{label}.xlsx",
+            filetypes=[("Excel (xlsx)", "*.xlsx"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            result = export_master_excel(path, status=status)
+            messagebox.showinfo(
+                "Export complete",
+                f"Exported {result.get('exported', 0)} rows to:\n{result.get('path')}",
+                parent=self.winfo_toplevel(),
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Export failed",
+                f"Could not export.\n{e}",
+                parent=self.winfo_toplevel(),
+            )
+
+    def _reset_matched(self):
+        try:
+            stats = get_master_stats()
+        except Exception:
+            stats = {"matched": 0}
+        matched = int(stats.get("matched") or 0)
+        if matched <= 0:
+            messagebox.showinfo(
+                "Nothing to reset",
+                "There are no matched pieces.",
+                parent=self.winfo_toplevel(),
+            )
+            return
+        ok = messagebox.askyesno(
+            "Reset matched pieces?",
+            f"This will mark {matched} matched piece(s) as open again\n"
+            "(so they can match on the next run). Nothing is deleted.\n\nContinue?",
+            parent=self.winfo_toplevel(),
+        )
+        if not ok:
+            return
+        try:
+            n = reset_matched_to_open()
+            self._refresh_master_status()
+            messagebox.showinfo(
+                "Reset complete",
+                f"Re-opened {n} matched piece(s).",
+                parent=self.winfo_toplevel(),
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Reset failed",
+                f"Could not reset matched pieces.\n{e}",
                 parent=self.winfo_toplevel(),
             )
 

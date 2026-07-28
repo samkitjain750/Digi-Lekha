@@ -8,7 +8,6 @@ from datetime import datetime
 from openpyxl.styles import PatternFill, Alignment
 
 from core.invoice_validation import validate_invoice_line_row, _parse_number as _inv_parse_num
-from core.prior_pieces import apply_prior_year_dash, load_prior_piece_set
 
 
 def _safe_float(value):
@@ -238,36 +237,16 @@ EXPORT_MTR_COL = "Finish Mtr"
 ITEMS_SHEET_NAME = "Sheet1"
 PIECE_CHECK_SHEET_NAME = "Piece_Check"
 
-# Piece-number characters that should flag a validation row red.
-_PIECE_FLAG_CHARS = set("IJLOQVW")
-
-
-def _piece_has_flag_chars(piece: str) -> bool:
-    """True if piece contains I, J, L, O, Q, V, W, or the substring TP (case-insensitive)."""
-    s = str(piece or "").upper()
-    if "TP" in s:
-        return True
-    return any(ch in _PIECE_FLAG_CHARS for ch in s)
-
 
 def _strip_tp_from_piece(piece: str) -> str:
     """
-    Remove TP from piece number for Items export (case-insensitive).
-    Also removes bracketed forms like (TP), [TP], {TP} so 223ZC(TP) -> 223ZC.
+    Remove TP from piece number for Sheet1 (case-insensitive).
+    Also removes the dash that belongs with TP: 276H-TP -> 276H, 223ZC(TP) -> 223ZC.
+    Keeps a leading due-piece '-' when present without TP.
     """
-    s = str(piece or "")
-    # Drop whole bracketed TP markers first (avoids leftover empty brackets).
-    s = re.sub(r"[\(\[\{]\s*TP\s*[\)\]\}]", "", s, flags=re.IGNORECASE)
-    # Remove any remaining TP/Tp/tP/tp substrings.
-    out = []
-    i = 0
-    while i < len(s):
-        if i + 1 < len(s) and s[i].upper() == "T" and s[i + 1].upper() == "P":
-            i += 2
-            continue
-        out.append(s[i])
-        i += 1
-    return "".join(out).strip()
+    from core.dye_master import _strip_tp
+
+    return _strip_tp(piece)
 
 
 def get_document_columns(config: dict) -> list:
@@ -298,16 +277,12 @@ def get_item_columns(config: dict) -> list:
     out = []
     if "piece_number" in selected:
         out.append(EXPORT_PIECE_COL)
-    # Always include Quality + table Challan No. for dye-master verification.
-    out.append(EXPORT_QUALITY_COL)
-    out.append(EXPORT_TABLE_CHALLAN_COL)
     if "grey_mtrs" in selected:
         out.append(EXPORT_GREY_COL)
     if "dispatch_mtr" in selected:
         out.append(EXPORT_MTR_COL)
-    # Always keep Grey Mtr between piece/challan and finish when piece+finish are present.
+    # Always keep Grey Mtr between piece and finish when piece+finish are present.
     if EXPORT_PIECE_COL in out and EXPORT_MTR_COL in out and EXPORT_GREY_COL not in out:
-        # insert grey before finish
         fin_idx = out.index(EXPORT_MTR_COL)
         out.insert(fin_idx, EXPORT_GREY_COL)
     return ITEM_STATIC_COLS + out
@@ -317,6 +292,7 @@ def _line_item_flag_reason(r: dict) -> tuple[bool, str, object]:
     """
     Return (is_flagged, reason, shrinkage_value) for one line item.
     Same rules as Validation_Report.
+    Does NOT flag for I/J/L/O/Q/V/W letters in piece_no (those are handled by Piece_Check).
     """
     piece = str(r.get("piece_number", "") or "").strip()
     grey = _safe_float(r.get("grey_mtrs"))
@@ -326,8 +302,17 @@ def _line_item_flag_reason(r: dict) -> tuple[bool, str, object]:
     issue_parts = []
     shrinkage = ""
 
-    if _piece_has_flag_chars(piece):
-        issue_parts.append("piece_no contains I/J/L/O/Q/V/W or TP")
+    # Ignore model flags that only complain about I/J/L/O/Q/V/W or TP letter presence.
+    reason_l = reason.lower()
+    letter_only_reason = (
+        "i/j" in reason_l
+        or "contains i" in reason_l
+        or "piece_no contains" in reason_l
+        or reason_l.strip() in ("confusion i/j", "confusion i/j, o/0, s/5, b/8")
+    )
+    if letter_only_reason and "shrinkage" not in reason_l and "finished" not in reason_l:
+        model_flag = False
+        reason = ""
 
     if grey is not None and finished is not None:
         if finished >= grey:
@@ -349,6 +334,20 @@ def _line_item_flag_reason(r: dict) -> tuple[bool, str, object]:
     if not reason and issue_parts:
         reason = "; ".join(issue_parts)
     return final_flag, reason, shrinkage
+
+
+def _sheet1_should_red_fill(r: dict) -> bool:
+    """
+    Red-fill Sheet1 only for meter/shrinkage issues — not for piece-letter noise.
+    """
+    flagged, reason, _ = _line_item_flag_reason(r)
+    if not flagged:
+        return False
+    reason_l = str(reason or "").lower()
+    # If the only issues are letter/TP style, do not paint Sheet1.
+    if "piece_no contains" in reason_l and "shrinkage" not in reason_l and "finished" not in reason_l:
+        return False
+    return True
 
 
 def _document_s_no(r: dict):
@@ -410,13 +409,12 @@ def _apply_validation_row_colors(ws, start_data_row: int, end_data_row: int) -> 
 
 def _sheet1_rows_for_flagged(line_items: list, data_start_row: int) -> list:
     """
-    Excel row numbers on Sheet1 that correspond to flagged line items.
+    Excel row numbers on Sheet1 that should be red-filled (meter/shrinkage issues only).
     data_start_row: 1-based row of the first item in this write batch.
     """
     rows = []
     for i, r in enumerate(line_items):
-        flagged, _, _ = _line_item_flag_reason(r)
-        if flagged:
+        if _sheet1_should_red_fill(r):
             rows.append(data_start_row + i)
     return rows
 
@@ -458,13 +456,13 @@ def _build_sheet1_and_validation(
     items = data.get("items", []) or []
     line_items = [_normalize_item_row(it, file_name) for it in items]
     item_cols = get_item_columns(config)
-    prior_set = load_prior_piece_set()
     rows_items = []
     for r in line_items:
         row = {}
         if EXPORT_PIECE_COL in item_cols:
-            piece = _strip_tp_from_piece(r.get("piece_number", ""))
-            row[EXPORT_PIECE_COL] = apply_prior_year_dash(piece, prior_set)
+            # Keep leading '-' if OCR/master had it; strip TP only.
+            # Dye-master Piece_Check later overwrites OK rows with master display form.
+            row[EXPORT_PIECE_COL] = _strip_tp_from_piece(r.get("piece_number", ""))
         if EXPORT_QUALITY_COL in item_cols:
             row[EXPORT_QUALITY_COL] = str(r.get("quality", "") or "").strip()
         if EXPORT_TABLE_CHALLAN_COL in item_cols:
@@ -532,9 +530,14 @@ def rewrite_challan_excel(
 
 
 def write_piece_check_sheet(output_file: str, check_rows: list[dict]) -> None:
-    """Create/replace Piece_Check sheet on an existing challan workbook."""
+    """
+    Create/replace Piece_Check sheet on an existing challan workbook.
+    For OK matches, overwrite Sheet1 Process PieceNo with master's display form
+    (keeps leading '-' exactly as stored in the dye master Excel).
+    """
     from core.dye_master import PIECE_CHECK_COLUMNS
     from openpyxl import load_workbook
+    from openpyxl.styles import PatternFill
 
     if not output_file or not os.path.exists(output_file):
         return
@@ -552,6 +555,33 @@ def write_piece_check_sheet(output_file: str, check_rows: list[dict]) -> None:
             if status and status != "OK":
                 cell.fill = red_fill
     _apply_left_alignment(ws)
+
+    # Apply master piece display onto Sheet1 for OK rows (keep leading '-'; strip -TP).
+    # For SKIPPED_TP rows, also strip -TP from the Sheet1 piece column.
+    from core.dye_master import _strip_tp
+
+    ws_i = wb[ITEMS_SHEET_NAME] if ITEMS_SHEET_NAME in wb.sheetnames else None
+    if ws_i is None and "Items" in wb.sheetnames:
+        ws_i = wb["Items"]
+    if ws_i is not None and ws_i.max_row >= 1:
+        headers = [c.value for c in ws_i[1]]
+        try:
+            piece_col = headers.index(EXPORT_PIECE_COL) + 1
+        except ValueError:
+            piece_col = 1
+        for i, row in enumerate(check_rows or []):
+            sheet_row = i + 2
+            if sheet_row > (ws_i.max_row or 0):
+                break
+            status = str((row or {}).get("Status", "") or "")
+            expected = str((row or {}).get("Expected Piece", "") or "").strip()
+            piece_ocr = str((row or {}).get("Piece No.", "") or "").strip()
+            if status == "OK" and expected:
+                ws_i.cell(row=sheet_row, column=piece_col).value = _strip_tp(expected)
+            elif status == "SKIPPED_TP":
+                raw = expected or piece_ocr or ws_i.cell(row=sheet_row, column=piece_col).value
+                ws_i.cell(row=sheet_row, column=piece_col).value = _strip_tp(raw)
+
     wb.save(output_file)
     wb.close()
 
