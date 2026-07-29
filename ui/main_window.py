@@ -77,6 +77,8 @@ class MainWindow:
         self._setup_logging()
         self._show_page("dashboard")
         self.root.update_idletasks()
+        # Remind to refresh Master Data on every launch.
+        self.root.after(400, self._prompt_master_data_update)
 
     def _build_ui(self):
         # Left sidebar
@@ -142,6 +144,12 @@ class MainWindow:
         if page_key == "results":
             self.results_page.set_output_dir(self.dashboard.output_var.get())
             self.results_page.load_preview()
+
+    def _prompt_master_data_update(self):
+        try:
+            self.settings_page.prompt_master_update_on_startup()
+        except Exception:
+            pass
 
     def _refresh_output_previews(self):
         """After a run, reload challan preview from the current dashboard output folder."""
@@ -251,6 +259,9 @@ class MainWindow:
             self.progress_errors = getattr(self, "progress_errors", 0) + 1
         def upd():
             self.documents.update_file_status(filename, status, doc_type, items_count)
+            self.dashboard.set_progress(
+                self.progress_total, self.progress_processed, self.progress_errors
+            )
         self.root.after(0, upd)
 
     def _processing_done(self):

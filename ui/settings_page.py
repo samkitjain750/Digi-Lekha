@@ -18,7 +18,6 @@ from core.dye_master import (
     format_help_text as master_format_help_text,
     get_master_stats,
     import_dye_master_excel,
-    reset_matched_to_open,
 )
 from core.openai_extractor import (
     get_openai_api_key,
@@ -192,8 +191,8 @@ class SettingsPage(ctk.CTkFrame):
         ctk.CTkLabel(
             inner,
             text=(
-                "Upload Master Data.xls (Process Name / Quality Name blocks). "
-                "One file verifies piece numbers and sets '-' on Sheet1 "
+                "Update Master Data.xls every day (full replace — no append). "
+                "This file verifies piece numbers and sets '-' on Sheet1 "
                 "exactly as stored in Master Data."
             ),
             font=ctk.CTkFont(size=13),
@@ -218,51 +217,21 @@ class SettingsPage(ctk.CTkFrame):
         btns.pack(anchor="w")
         ctk.CTkButton(
             btns,
-            text="Upload / Append Excel",
+            text="Update Master Data",
             corner_radius=8,
             height=36,
             fg_color=PRIMARY,
-            command=lambda: self._upload_master(replace=False),
+            command=self.update_master_data,
         ).pack(side="left")
         ctk.CTkButton(
             btns,
-            text="Replace all",
-            corner_radius=8,
-            height=36,
-            fg_color="#EF4444",
-            hover_color="#DC2626",
-            command=lambda: self._upload_master(replace=True),
-        ).pack(side="left", padx=10)
-
-        btns2 = ctk.CTkFrame(inner, fg_color="transparent")
-        btns2.pack(anchor="w", pady=(10, 0))
-        ctk.CTkButton(
-            btns2,
-            text="Export open pieces",
-            corner_radius=8,
-            height=36,
-            fg_color="#0F766E",
-            hover_color="#0D9488",
-            command=lambda: self._export_master(status="open"),
-        ).pack(side="left")
-        ctk.CTkButton(
-            btns2,
-            text="Export all",
+            text="Export master",
             corner_radius=8,
             height=36,
             fg_color="#475569",
             hover_color="#334155",
-            command=lambda: self._export_master(status=None),
+            command=self._export_master,
         ).pack(side="left", padx=10)
-        ctk.CTkButton(
-            btns2,
-            text="Reset matched → open",
-            corner_radius=8,
-            height=36,
-            fg_color="#D97706",
-            hover_color="#B45309",
-            command=self._reset_matched,
-        ).pack(side="left")
 
     def _refresh_api_status(self):
         key = get_openai_api_key(self.base_dir)
@@ -307,16 +276,16 @@ class SettingsPage(ctk.CTkFrame):
         try:
             stats = get_master_stats()
         except Exception:
-            stats = {"total": 0, "open": 0, "matched": 0, "last_import": "", "source_file": ""}
+            stats = {"total": 0, "last_import": "", "source_file": ""}
         if not stats.get("total"):
             self.master_status.configure(
-                text="No Master Data loaded yet. Upload Master Data.xls once, then append daily."
+                text="No Master Data loaded yet. Use Update Master Data with today's Excel."
             )
             return
         self.master_status.configure(
             text=(
-                f"Total: {stats['total']}  |  Open: {stats['open']}  |  Matched: {stats['matched']}\n"
-                f"Last import: {stats.get('last_import') or '-'}\n"
+                f"Pieces: {stats['total']}\n"
+                f"Last update: {stats.get('last_import') or '-'}\n"
                 f"Source: {stats.get('source_file') or '-'}"
             )
         )
@@ -328,19 +297,45 @@ class SettingsPage(ctk.CTkFrame):
             parent=self.winfo_toplevel(),
         )
 
-    def _upload_master(self, *, replace: bool):
-        if replace:
+    def prompt_master_update_on_startup(self) -> None:
+        """Ask the user to update Master Data when the app opens."""
+        try:
+            stats = get_master_stats()
+        except Exception:
+            stats = {"total": 0, "last_import": "", "source_file": ""}
+        last = stats.get("last_import") or "never"
+        total = stats.get("total") or 0
+        src = stats.get("source_file") or "-"
+        msg = (
+            "Update Master Data for today?\n\n"
+            "Upload today's Master Data.xls to fully replace the current list "
+            "(no append).\n\n"
+            f"Current pieces: {total}\n"
+            f"Last update: {last}\n"
+            f"Source: {src}"
+        )
+        ok = messagebox.askyesno(
+            "Update Master Data",
+            msg,
+            parent=self.winfo_toplevel(),
+        )
+        if ok:
+            self.update_master_data(confirm=False)
+
+    def update_master_data(self, *, confirm: bool = True) -> bool:
+        """Replace Master Data with a newly selected Excel. Returns True if updated."""
+        if confirm:
             ok = messagebox.askyesno(
-                "Replace Master Data?",
-                "This will DELETE all existing Master Data rows (open and matched),\n"
-                "then import the selected Excel.\n\nContinue?",
+                "Update Master Data?",
+                "This replaces ALL current Master Data with the selected Excel.\n"
+                "There is no append.\n\nContinue?",
                 parent=self.winfo_toplevel(),
             )
             if not ok:
-                return
+                return False
         path = filedialog.askopenfilename(
             parent=self.winfo_toplevel(),
-            title="Select Master Data Excel",
+            title="Select today's Master Data Excel",
             filetypes=[
                 ("Excel files", "*.xlsx *.xls"),
                 ("Excel (xlsx)", "*.xlsx"),
@@ -349,64 +344,57 @@ class SettingsPage(ctk.CTkFrame):
             ],
         )
         if not path:
-            return
+            return False
         try:
-            stats = import_dye_master_excel(path, replace=replace)
+            stats = import_dye_master_excel(path, replace=True)
             self._refresh_master_status()
-            action = "Replaced and imported" if replace else "Appended"
             messagebox.showinfo(
                 "Master Data updated",
-                f"{action} {stats.get('inserted', 0)} new rows "
-                f"(parsed {stats.get('parsed', 0)}, "
-                f"skipped duplicates {stats.get('skipped_duplicates', 0)}).\n\n"
-                f"Open: {stats.get('open', 0)}  |  Matched: {stats.get('matched', 0)}  |  "
-                f"Total: {stats.get('total', 0)}",
+                f"Loaded {stats.get('inserted', 0)} pieces "
+                f"(parsed {stats.get('parsed', 0)}).\n\n"
+                f"Total: {stats.get('total', 0)}\n"
+                f"Source: {stats.get('source_file') or '-'}",
                 parent=self.winfo_toplevel(),
             )
+            return True
         except ValueError as e:
             messagebox.showerror(
                 "Wrong Excel format",
                 str(e),
                 parent=self.winfo_toplevel(),
             )
+            return False
         except Exception as e:
             messagebox.showerror(
-                "Upload failed",
+                "Update failed",
                 f"Could not import the file.\n{e}",
                 parent=self.winfo_toplevel(),
             )
+            return False
 
-    def _export_master(self, *, status: str | None):
+    def _export_master(self):
         try:
             stats = get_master_stats()
         except Exception:
-            stats = {"total": 0, "open": 0}
-        if status == "open" and not stats.get("open"):
+            stats = {"total": 0}
+        if not stats.get("total"):
             messagebox.showinfo(
                 "Nothing to export",
-                "There are no open pieces in Master Data.",
+                "Master Data is empty. Update Master Data.xls first.",
                 parent=self.winfo_toplevel(),
             )
             return
-        if status is None and not stats.get("total"):
-            messagebox.showinfo(
-                "Nothing to export",
-                "Master Data is empty. Upload Master Data.xls first.",
-                parent=self.winfo_toplevel(),
-            )
-            return
-        label = "open" if status == "open" else "all"
         path = filedialog.asksaveasfilename(
             parent=self.winfo_toplevel(),
-            title=f"Export Master Data ({label})",
+            title="Export Master Data",
             defaultextension=".xlsx",
-            initialfile=f"Master_Data_{label}.xlsx",
+            initialfile="Master_Data.xlsx",
             filetypes=[("Excel (xlsx)", "*.xlsx"), ("All files", "*.*")],
         )
         if not path:
             return
         try:
-            result = export_master_excel(path, status=status)
+            result = export_master_excel(path)
             messagebox.showinfo(
                 "Export complete",
                 f"Exported {result.get('exported', 0)} rows to:\n{result.get('path')}",
@@ -416,42 +404,6 @@ class SettingsPage(ctk.CTkFrame):
             messagebox.showerror(
                 "Export failed",
                 f"Could not export.\n{e}",
-                parent=self.winfo_toplevel(),
-            )
-
-    def _reset_matched(self):
-        try:
-            stats = get_master_stats()
-        except Exception:
-            stats = {"matched": 0}
-        matched = int(stats.get("matched") or 0)
-        if matched <= 0:
-            messagebox.showinfo(
-                "Nothing to reset",
-                "There are no matched pieces.",
-                parent=self.winfo_toplevel(),
-            )
-            return
-        ok = messagebox.askyesno(
-            "Reset matched pieces?",
-            f"This will mark {matched} matched piece(s) as open again\n"
-            "(so they can match on the next run). Nothing is deleted.\n\nContinue?",
-            parent=self.winfo_toplevel(),
-        )
-        if not ok:
-            return
-        try:
-            n = reset_matched_to_open()
-            self._refresh_master_status()
-            messagebox.showinfo(
-                "Reset complete",
-                f"Re-opened {n} matched piece(s).",
-                parent=self.winfo_toplevel(),
-            )
-        except Exception as e:
-            messagebox.showerror(
-                "Reset failed",
-                f"Could not reset matched pieces.\n{e}",
                 parent=self.winfo_toplevel(),
             )
 

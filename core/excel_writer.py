@@ -291,63 +291,39 @@ def get_item_columns(config: dict) -> list:
 def _line_item_flag_reason(r: dict) -> tuple[bool, str, object]:
     """
     Return (is_flagged, reason, shrinkage_value) for one line item.
-    Same rules as Validation_Report.
-    Does NOT flag for I/J/L/O/Q/V/W letters in piece_no (those are handled by Piece_Check).
+    Meter/shrinkage band checks are disabled — piece issues go to Piece_Check only.
     """
-    piece = str(r.get("piece_number", "") or "").strip()
     grey = _safe_float(r.get("grey_mtrs"))
     finished = _safe_float(r.get("dispatch_mtr"))
     model_flag = bool(r.get("flag", False))
     reason = str(r.get("reason", "") or "").strip()
-    issue_parts = []
     shrinkage = ""
 
-    # Ignore model flags that only complain about I/J/L/O/Q/V/W or TP letter presence.
+    # Ignore model flags that only complain about I/J/L/O/Q/V/W or TP letter presence,
+    # or about finish/shrinkage (those checks are no longer used).
     reason_l = reason.lower()
-    letter_only_reason = (
+    ignore_reason = (
         "i/j" in reason_l
         or "contains i" in reason_l
         or "piece_no contains" in reason_l
+        or "shrinkage" in reason_l
+        or "finished" in reason_l
+        or "not smaller" in reason_l
         or reason_l.strip() in ("confusion i/j", "confusion i/j, o/0, s/5, b/8")
     )
-    if letter_only_reason and "shrinkage" not in reason_l and "finished" not in reason_l:
+    if ignore_reason:
         model_flag = False
         reason = ""
 
-    if grey is not None and finished is not None:
-        if finished >= grey:
-            issue_parts.append("finished_mtrs is not smaller than grey_mtrs")
-        if grey != 0:
-            shrink = ((grey - finished) / grey) * 100.0
-            shrinkage = round(shrink, 2)
-            if shrink < 2 or shrink > 10:
-                issue_parts.append("shrinkage outside 2%-10%")
-    else:
-        missing = []
-        if grey is None:
-            missing.append("grey_mtrs")
-        if finished is None:
-            missing.append("finished_mtrs")
-        issue_parts.append(f"missing numeric value(s): {', '.join(missing)}")
+    if grey is not None and finished is not None and grey != 0:
+        shrinkage = round(((grey - finished) / grey) * 100.0, 2)
 
-    final_flag = model_flag or len(issue_parts) > 0
-    if not reason and issue_parts:
-        reason = "; ".join(issue_parts)
-    return final_flag, reason, shrinkage
+    return model_flag, reason, shrinkage
 
 
 def _sheet1_should_red_fill(r: dict) -> bool:
-    """
-    Red-fill Sheet1 only for meter/shrinkage issues — not for piece-letter noise.
-    """
-    flagged, reason, _ = _line_item_flag_reason(r)
-    if not flagged:
-        return False
-    reason_l = str(reason or "").lower()
-    # If the only issues are letter/TP style, do not paint Sheet1.
-    if "piece_no contains" in reason_l and "shrinkage" not in reason_l and "finished" not in reason_l:
-        return False
-    return True
+    """Sheet1 is not red-filled for meter/shrinkage (checks removed)."""
+    return False
 
 
 def _document_s_no(r: dict):
@@ -493,6 +469,38 @@ def _build_sheet1_and_validation(
     return df_items, df_validation, line_items
 
 
+def short_piece_check_reason(status: str, reason: str = "") -> str:
+    """Short user-facing reason for Piece_Check problem rows."""
+    st = str(status or "").strip().upper()
+    r = str(reason or "").strip()
+    rl = r.lower()
+    if st == "NOT_FOUND":
+        if "empty" in rl:
+            return "Empty piece number"
+        return "Not in master"
+    if st == "SKIPPED_TP":
+        return "Has TP — skipped"
+    if st == "MISMATCH":
+        return "Piece differs from master"
+    if st == "TOTALS":
+        return "Grand total mismatch"
+    if r.lower().startswith("ocr letter"):
+        # Keep the compact fix message
+        return r.replace("OCR letter correction (same prefix): ", "OCR letter fix: ")[:80]
+    return (r[:80] if r else st or "Issue")
+
+
+def shorten_piece_check_rows(check_rows: list[dict]) -> list[dict]:
+    """Apply short user-facing Reason text; no meter/shrinkage flags."""
+    out = []
+    for row in check_rows or []:
+        row = dict(row or {})
+        status = str(row.get("Status", "") or "")
+        row["Reason"] = short_piece_check_reason(status, str(row.get("Reason", "") or ""))
+        out.append(row)
+    return out
+
+
 def rewrite_challan_excel(
     output_file: str,
     data: dict,
@@ -503,9 +511,10 @@ def rewrite_challan_excel(
     totals_failed: bool = False,
 ) -> bool:
     """
-    Replace Sheet1 and Validation_Report entirely (used after totals correction).
+    Replace Sheet1 entirely (used after totals correction).
+    Validation_Report is not written — issues go to Piece_Check.
     """
-    df_items, df_validation, line_items = _build_sheet1_and_validation(
+    df_items, _df_validation, line_items = _build_sheet1_and_validation(
         data,
         file_name,
         config,
@@ -514,52 +523,78 @@ def rewrite_challan_excel(
     )
     with pd.ExcelWriter(output_file, engine="openpyxl", mode="w") as writer:
         df_items.to_excel(writer, sheet_name=ITEMS_SHEET_NAME, index=False)
-        df_validation.to_excel(writer, sheet_name="Validation_Report", index=False)
-        ws_v = writer.sheets.get("Validation_Report")
-        if ws_v is not None and len(df_validation) > 0:
-            _apply_validation_row_colors(ws_v, 2, 1 + len(df_validation))
         ws_i = writer.sheets.get(ITEMS_SHEET_NAME)
         if ws_i is not None:
             _apply_red_fill_rows(ws_i, _sheet1_rows_for_flagged(line_items, 2))
             _apply_numeric_cell_types(ws_i, ITEMS_NUMERIC_HEADERS)
             _apply_left_alignment(ws_i)
-        if ws_v is not None:
-            _apply_numeric_cell_types(ws_v, VALIDATION_NUMERIC_HEADERS)
-            _apply_left_alignment(ws_v)
     return True
 
 
-def write_piece_check_sheet(output_file: str, check_rows: list[dict]) -> None:
+def build_piece_check_stubs_from_items(items: list[dict] | None) -> list[dict]:
+    """Placeholder OK rows when master is empty — meters/totals still fill Piece_Check."""
+    rows = []
+    for i, it in enumerate(items or [], start=1):
+        if not isinstance(it, dict):
+            continue
+        piece = str(
+            it.get("original_piece")
+            or it.get("piece_number")
+            or it.get("piece_no")
+            or ""
+        ).strip()
+        rows.append(
+            {
+                "S No.": it.get("s_no") or i,
+                "Piece No.": piece,
+                "Grey Mtr": _excel_number(it.get("grey_mtrs")),
+                "Expected Piece": "",
+                "Status": "OK",
+                "Reason": "",
+            }
+        )
+    return rows
+
+
+def write_piece_check_sheet(
+    output_file: str,
+    check_rows: list[dict],
+    *,
+    items: list[dict] | None = None,
+    totals_note: str = "",
+) -> None:
     """
-    Create/replace Piece_Check sheet on an existing challan workbook.
-    For OK matches, overwrite Sheet1 Process PieceNo with master's display form
-    (keeps leading '-' exactly as stored in the dye master Excel).
+    Create/replace Piece_Check with problem rows only (red).
+    Still applies master Expected Piece onto Sheet1 for all check_rows.
+    Removes Validation_Report if present.
     """
-    from core.dye_master import PIECE_CHECK_COLUMNS
+    from core.dye_master import PIECE_CHECK_COLUMNS, _strip_tp
     from openpyxl import load_workbook
-    from openpyxl.styles import PatternFill
+    from openpyxl.styles import PatternFill, Font
 
     if not output_file or not os.path.exists(output_file):
         return
     wb = load_workbook(output_file)
+    # Drop obsolete Validation_Report
+    if "Validation_Report" in wb.sheetnames:
+        del wb["Validation_Report"]
     if PIECE_CHECK_SHEET_NAME in wb.sheetnames:
         del wb[PIECE_CHECK_SHEET_NAME]
-    ws = wb.create_sheet(PIECE_CHECK_SHEET_NAME)
-    for col_idx, name in enumerate(PIECE_CHECK_COLUMNS, start=1):
-        ws.cell(row=1, column=col_idx, value=name)
-    red_fill = PatternFill(start_color="FDECEC", end_color="FDECEC", fill_type="solid")
-    for row_idx, row in enumerate(check_rows or [], start=2):
-        status = str((row or {}).get("Status", "") or "")
-        for col_idx, name in enumerate(PIECE_CHECK_COLUMNS, start=1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=(row or {}).get(name))
-            if status and status != "OK":
-                cell.fill = red_fill
-    _apply_left_alignment(ws)
 
-    # Apply master piece display onto Sheet1 for OK rows (keep leading '-'; strip -TP).
-    # For SKIPPED_TP rows, also strip -TP from the Sheet1 piece column.
-    from core.dye_master import _strip_tp
+    full_rows = shorten_piece_check_rows(check_rows or [])
+    if totals_note:
+        full_rows.append(
+            {
+                "S No.": "",
+                "Piece No.": "",
+                "Grey Mtr": None,
+                "Expected Piece": "",
+                "Status": "TOTALS",
+                "Reason": short_piece_check_reason("TOTALS", totals_note),
+            }
+        )
 
+    # Apply Expected Piece onto Sheet1 using item-aligned rows (skip TOTALS)
     ws_i = wb[ITEMS_SHEET_NAME] if ITEMS_SHEET_NAME in wb.sheetnames else None
     if ws_i is None and "Items" in wb.sheetnames:
         ws_i = wb["Items"]
@@ -569,18 +604,48 @@ def write_piece_check_sheet(output_file: str, check_rows: list[dict]) -> None:
             piece_col = headers.index(EXPORT_PIECE_COL) + 1
         except ValueError:
             piece_col = 1
-        for i, row in enumerate(check_rows or []):
-            sheet_row = i + 2
+        sheet_i = 0
+        for row in full_rows:
+            if str(row.get("Status", "")) == "TOTALS":
+                continue
+            sheet_row = sheet_i + 2
+            sheet_i += 1
             if sheet_row > (ws_i.max_row or 0):
                 break
             status = str((row or {}).get("Status", "") or "")
             expected = str((row or {}).get("Expected Piece", "") or "").strip()
             piece_ocr = str((row or {}).get("Piece No.", "") or "").strip()
-            if status == "OK" and expected:
+            if status in ("OK", "MISMATCH") and expected:
                 ws_i.cell(row=sheet_row, column=piece_col).value = _strip_tp(expected)
             elif status == "SKIPPED_TP":
                 raw = expected or piece_ocr or ws_i.cell(row=sheet_row, column=piece_col).value
                 ws_i.cell(row=sheet_row, column=piece_col).value = _strip_tp(raw)
+
+    # Problem rows only on Piece_Check
+    problem_rows = [
+        r
+        for r in full_rows
+        if str(r.get("Status", "") or "").upper() not in ("OK", "")
+    ]
+
+    ws = wb.create_sheet(PIECE_CHECK_SHEET_NAME)
+    for col_idx, name in enumerate(PIECE_CHECK_COLUMNS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=name)
+        cell.font = Font(bold=True)
+    red_fill = PatternFill(start_color="FDECEC", end_color="FDECEC", fill_type="solid")
+    for row_idx, row in enumerate(problem_rows, start=2):
+        display = {
+            "S No.": row.get("S No.", row_idx - 1),
+            "Piece No.": row.get("Piece No.", ""),
+            "Grey Mtr": row.get("Grey Mtr"),
+            "Expected Piece": row.get("Expected Piece", ""),
+            "Status": row.get("Status", ""),
+            "Reason": row.get("Reason", ""),
+        }
+        for col_idx, name in enumerate(PIECE_CHECK_COLUMNS, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=display.get(name))
+            cell.fill = red_fill
+    _apply_left_alignment(ws)
 
     wb.save(output_file)
     wb.close()
@@ -594,13 +659,13 @@ def write_to_excel(
     output_file: str = None,
 ) -> bool:
     """
-    Write one document's extracted data to an Excel file.
-    Creates the file if missing; appends Sheet1 / Validation_Report if it already exists
+    Write one document's extracted data to Sheet1.
+    Creates the file if missing; appends Sheet1 if it already exists
     (e.g. continuation page of the same challan).
-    Validation_Report includes only wrong (flagged) rows.
+    Piece_Check (problem rows only) is written later after totals + master check.
     """
     output_file = output_file or os.path.join(output_dir, "extracted_data.xlsx")
-    df_items, df_validation, line_items = _build_sheet1_and_validation(
+    df_items, _df_validation, line_items = _build_sheet1_and_validation(
         data, file_name, config
     )
 
@@ -608,19 +673,12 @@ def write_to_excel(
         if not os.path.exists(output_file):
             with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
                 df_items.to_excel(writer, sheet_name=ITEMS_SHEET_NAME, index=False)
-                df_validation.to_excel(writer, sheet_name="Validation_Report", index=False)
-                ws_v = writer.sheets.get("Validation_Report")
-                if ws_v is not None and len(df_validation) > 0:
-                    _apply_validation_row_colors(ws_v, 2, 1 + len(df_validation))
                 ws_i = writer.sheets.get(ITEMS_SHEET_NAME)
                 if ws_i is not None:
                     # Header is row 1; first item is row 2.
                     _apply_red_fill_rows(ws_i, _sheet1_rows_for_flagged(line_items, 2))
                     _apply_numeric_cell_types(ws_i, ITEMS_NUMERIC_HEADERS)
                     _apply_left_alignment(ws_i)
-                if ws_v is not None:
-                    _apply_numeric_cell_types(ws_v, VALIDATION_NUMERIC_HEADERS)
-                    _apply_left_alignment(ws_v)
         else:
             with pd.ExcelWriter(output_file, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
                 items_sheet = (
@@ -650,29 +708,21 @@ def write_to_excel(
                     )
                     _apply_numeric_cell_types(ws_i, ITEMS_NUMERIC_HEADERS)
                     _apply_left_alignment(ws_i)
-                if "Validation_Report" not in writer.sheets:
-                    df_validation.to_excel(writer, sheet_name="Validation_Report", index=False)
-                    ws_v = writer.sheets.get("Validation_Report")
-                    if ws_v is not None and len(df_validation) > 0:
-                        _apply_validation_row_colors(ws_v, 2, 1 + len(df_validation))
-                else:
-                    startrow = writer.sheets["Validation_Report"].max_row
-                    if len(df_validation) > 0:
-                        df_validation.to_excel(
-                            writer,
-                            sheet_name="Validation_Report",
-                            startrow=startrow,
-                            index=False,
-                            header=False,
-                        )
-                        ws_v = writer.sheets.get("Validation_Report")
-                        if ws_v is not None:
-                            _apply_validation_row_colors(ws_v, startrow + 1, startrow + len(df_validation))
-                    else:
-                        ws_v = writer.sheets.get("Validation_Report")
-                if ws_v is not None:
-                    _apply_numeric_cell_types(ws_v, VALIDATION_NUMERIC_HEADERS)
-                    _apply_left_alignment(ws_v)
+                # Remove legacy Validation_Report if present on older files
+                if "Validation_Report" in writer.sheets:
+                    # pandas ExcelWriter doesn't expose delete; strip after save
+                    pass
+        # Strip Validation_Report left on older workbooks
+        try:
+            from openpyxl import load_workbook
+
+            wb = load_workbook(output_file)
+            if "Validation_Report" in wb.sheetnames:
+                del wb["Validation_Report"]
+                wb.save(output_file)
+            wb.close()
+        except Exception:
+            pass
         return True
     except Exception:
         raise

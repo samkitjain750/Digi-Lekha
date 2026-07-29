@@ -13,6 +13,7 @@ from .excel_writer import (
     write_to_excel,
     build_challan_excel_filename,
     write_piece_check_sheet,
+    build_piece_check_stubs_from_items,
     _header_first,
 )
 from .totals_reconcile import (
@@ -242,6 +243,8 @@ def process_documents(
             total_items = 0
             wrote_any = False
             saw_invoice_only = False
+            saw_empty_extraction = False
+            had_hard_failure = False
             last_doc_type = "delivery_challan"
             excel_files_written = set()
             last_excel_path = None
@@ -255,6 +258,7 @@ def process_documents(
                     [page_image], config, base_dir, log_callback
                 )
                 if not response_text:
+                    had_hard_failure = True
                     if log_callback:
                         log_callback(f"Skipping page {page_idx + 1} due to API failure.", True)
                     continue
@@ -264,6 +268,7 @@ def process_documents(
                 try:
                     data = parse_extraction_response(response_text, page_label, logs_dir)
                 except ValueError as e:
+                    had_hard_failure = True
                     if log_callback:
                         log_callback(str(e), True)
                     continue
@@ -293,6 +298,7 @@ def process_documents(
                         )
 
                 if not items:
+                    saw_empty_extraction = True
                     # Still attach grand totals / image to the open challan when possible.
                     if last_excel_path and (g_tot is not None or f_tot is not None):
                         _update_challan_state(
@@ -330,16 +336,38 @@ def process_documents(
                     wrote_any = True
                     saw_invoice_only = False
                 except Exception as e:
+                    had_hard_failure = True
                     if log_callback:
                         log_callback(f"Excel writing error on page {page_idx + 1}: {e}", True)
                     continue
 
             if not wrote_any:
-                status = "skipped" if saw_invoice_only else "error"
-                if on_file_done:
-                    on_file_done(filename, status, last_doc_type if saw_invoice_only else "", 0)
-                if saw_invoice_only:
-                    move_to_processed(file_path, processed_dir, log_callback)
+                # Empty / invoice-only docs are skips, not dashboard errors.
+                # Only real failures (API/parse/write) count as errors.
+                if saw_invoice_only or (saw_empty_extraction and not had_hard_failure):
+                    status = "skipped"
+                    if log_callback:
+                        if saw_invoice_only:
+                            log_callback(
+                                f"SKIPPED {filename}: invoice only (export disabled)."
+                            )
+                        else:
+                            log_callback(
+                                f"SKIPPED {filename}: no delivery-challan line items found."
+                            )
+                    if on_file_done:
+                        on_file_done(filename, status, last_doc_type, 0)
+                    if saw_invoice_only:
+                        move_to_processed(file_path, processed_dir, log_callback)
+                else:
+                    status = "error"
+                    if log_callback:
+                        log_callback(
+                            f"ERROR {filename}: could not extract any challan data.",
+                            True,
+                        )
+                    if on_file_done:
+                        on_file_done(filename, status, "", 0)
                 if progress_callback:
                     progress_callback(i + 1, total)
                 continue
@@ -377,59 +405,80 @@ def process_documents(
                             True,
                         )
 
-            # Dye master piece verification (after totals rewrite may have updated items).
+            # Piece_Check: problem rows only (piece / meters / totals).
             try:
                 master_stats = get_master_stats()
             except Exception:
-                master_stats = {"open": 0}
-            if master_stats.get("open", 0) > 0:
-                if status_callback:
-                    status_callback("Checking pieces against Master Data...")
-                if log_callback:
+                master_stats = {"total": 0}
+            has_master = master_stats.get("total", 0) > 0
+            if status_callback:
+                status_callback(
+                    "Checking pieces against Master Data..."
+                    if has_master
+                    else "Building Piece_Check report..."
+                )
+            if log_callback:
+                if has_master:
                     log_callback("--- Master Data piece check ---")
-                for excel_path, state in challan_states.items():
-                    try:
-                        header = state.get("header") or {}
-                        process_name = _header_first(
-                            header,
-                            "company_name",
-                            "supplier_name",
-                            "from_company",
-                            "mill_name",
+                else:
+                    log_callback(
+                        "--- Piece_Check (meters/totals; Master Data empty) ---"
+                    )
+            for excel_path, state in challan_states.items():
+                try:
+                    header = state.get("header") or {}
+                    process_name = _header_first(
+                        header,
+                        "company_name",
+                        "supplier_name",
+                        "from_company",
+                        "mill_name",
+                    )
+                    if not process_name:
+                        # Fallback: parse from filename 1022_MANSAROVAR_INDUSTRIES.xlsx
+                        base = os.path.splitext(os.path.basename(excel_path))[0]
+                        parts = base.split("_", 1)
+                        process_name = (
+                            parts[1].replace("_", " ") if len(parts) > 1 else ""
                         )
-                        if not process_name:
-                            # Fallback: parse from filename 1022_MANSAROVAR_INDUSTRIES.xlsx
-                            base = os.path.splitext(os.path.basename(excel_path))[0]
-                            parts = base.split("_", 1)
-                            process_name = parts[1].replace("_", " ") if len(parts) > 1 else ""
-                        items = state.get("items") or []
+                    items = state.get("items") or []
+                    totals_note = str(state.get("totals_note") or "")
+                    if has_master:
                         check_rows, counts = verify_items_against_master(
                             items,
                             process_name=process_name,
                             challan_file=excel_path,
-                            mark_on_ok=True,
+                            mark_on_ok=False,
                         )
-                        write_piece_check_sheet(excel_path, check_rows)
-                        if log_callback:
-                            log_callback(
-                                f"Piece check {os.path.basename(excel_path)} "
-                                f"[{process_name}]: "
-                                f"OK={counts.get('OK', 0)}, "
-                                f"MISMATCH={counts.get('MISMATCH', 0)}, "
-                                f"NOT_FOUND={counts.get('NOT_FOUND', 0)}, "
-                                f"SKIPPED_TP={counts.get('SKIPPED_TP', 0)}"
+                    else:
+                        check_rows = build_piece_check_stubs_from_items(items)
+                        counts = {"OK": len(check_rows)}
+                    write_piece_check_sheet(
+                        excel_path,
+                        check_rows,
+                        items=items,
+                        totals_note=totals_note,
+                    )
+                    if log_callback:
+                        log_callback(
+                            f"Piece check {os.path.basename(excel_path)} "
+                            f"[{process_name or '—'}]: "
+                            f"OK={counts.get('OK', 0)}, "
+                            f"MISMATCH={counts.get('MISMATCH', 0)}, "
+                            f"NOT_FOUND={counts.get('NOT_FOUND', 0)}, "
+                            f"SKIPPED_TP={counts.get('SKIPPED_TP', 0)}"
+                            + (
+                                "; TOTALS mismatch"
+                                if totals_note
+                                else ""
                             )
-                    except Exception as e:
-                        if log_callback:
-                            log_callback(
-                                f"Piece check error for {os.path.basename(excel_path)}: {e}",
-                                True,
-                            )
-            elif log_callback:
-                log_callback(
-                    "Master Data empty/open=0 — skipped Piece_Check "
-                    "(upload Master Data.xls in Settings)."
-                )
+                        )
+                except Exception as e:
+                    if log_callback:
+                        log_callback(
+                            f"Piece check error for {os.path.basename(excel_path)}: {e}",
+                            True,
+                        )
     finally:
         cleanup_temp_files(all_temp_images)
 

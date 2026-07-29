@@ -91,12 +91,10 @@ build_win.bat
 
 ### Master Data (piece verification + dash)
 
-1. **Settings → Master Data → Upload / Append Excel** — import `Master Data.xls` once (Process Name / Quality Name blocks).
-2. Daily: export only **new** rows and **Append** (do not Replace unless you intend a full reset).
+1. On app start, Digi Lekha asks you to **Update Master Data** for the day.
+2. **Settings → Master Data → Update Master Data** — always a full replace with today's `Master Data.xls` (no append).
 3. Process challans as usual. Output Excel gets a **Piece_Check** sheet (OK / MISMATCH / NOT_FOUND / SKIPPED_TP).
-4. Matched master rows are soft-marked `matched` (not deleted). Outstanding at dye = `open` count in Settings.
-5. Sheet1 columns: **Process PieceNo**, **Grey Mtr**, **Finish Mtr**. Piece numbers keep `-` **exactly as in Master Data**. Quality / table Challan No. are used only for Piece_Check (not written to Sheet1).
-6. **Export open pieces** from Settings for outstanding-at-dye stock. **Reset matched → open** reopens soft-matched rows without deleting.
+4. Sheet1 columns: **Process PieceNo**, **Grey Mtr**, **Finish Mtr**. Piece numbers keep `-` **exactly as in Master Data**. Quality / table Challan No. are used only for Piece_Check (not written to Sheet1).
 
 ---
 

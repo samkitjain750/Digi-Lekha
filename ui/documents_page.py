@@ -9,7 +9,7 @@ import customtkinter as ctk
 WORKSPACE_BG = "#F8FAFC"
 BG_CARD = "#FFFFFF"
 
-STATUS_ICONS = {"waiting": "⏳", "processing": "🔄", "completed": "✅", "error": "❌"}
+STATUS_ICONS = {"waiting": "⏳", "processing": "🔄", "completed": "✅", "skipped": "⏭️", "error": "❌"}
 
 
 class DocumentsPage(ctk.CTkFrame):

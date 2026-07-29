@@ -270,15 +270,12 @@ def reconcile_challan_excel(
         log_callback=log_callback,
     )
     if not corrected:
-        _append_mismatch_validation(
-            excel_path,
-            config,
-            source_label,
+        _record_totals_mismatch(
+            state,
             printed_grey,
             printed_fin,
             sum_grey,
             sum_fin,
-            items,
         )
         return False
 
@@ -305,15 +302,12 @@ def reconcile_challan_excel(
                 f"Finish {_fmt(new_sum_f)} vs {_fmt(check_f)}.",
                 True,
             )
-        _append_mismatch_validation(
-            excel_path,
-            config,
-            source_label,
+        _record_totals_mismatch(
+            state,
             printed_grey,
             printed_fin,
             sum_grey,
             sum_fin,
-            items,
         )
         return False
 
@@ -329,6 +323,7 @@ def reconcile_challan_excel(
 
     state["items"] = new_items
     state["header"] = new_header
+    state.pop("totals_note", None)
     rewrite_challan_excel(
         excel_path,
         {"header": new_header, "items": new_items, "document_type": "delivery_challan"},
@@ -338,34 +333,15 @@ def reconcile_challan_excel(
     return True
 
 
-def _append_mismatch_validation(
-    excel_path: str,
-    config: dict,
-    source_label: str,
+def _record_totals_mismatch(
+    state: dict,
     printed_grey,
     printed_fin,
     sum_grey,
     sum_fin,
-    items: list,
 ) -> None:
-    """Leave existing Sheet1; add a totals-mismatch row on Validation_Report via rewrite note."""
-    # Keep original items; rewrite so Validation includes an explicit totals failure row.
-    reason = (
+    """Store short totals failure for Piece_Check (no Validation_Report)."""
+    state["totals_note"] = (
         f"Grand total mismatch: printed Grey={printed_grey} sum={sum_grey}; "
         f"printed Finish={printed_fin} sum={sum_fin}. Auto-correction failed."
-    )
-    rewrite_challan_excel(
-        excel_path,
-        {
-            "header": {
-                "grand_total_grey_mtrs": printed_grey,
-                "grand_total_finished_mtrs": printed_fin,
-            },
-            "items": items,
-            "document_type": "delivery_challan",
-        },
-        source_label,
-        config,
-        totals_note=reason,
-        totals_failed=True,
     )
