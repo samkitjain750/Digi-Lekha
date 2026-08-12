@@ -75,16 +75,47 @@ def _strip_tp(piece: str) -> str:
     return "".join(out).strip().rstrip("-").strip()
 
 
-def normalize_piece_key(piece: Any) -> str:
+# Valid piece body: 1–5 digits + 1–3 letters, must end on a letter.
+# Strips OCR noise after the letter run (3052A1 → 3052A, 4002ZC1B → 4002ZC).
+_PIECE_BODY_RE = re.compile(r"^(\d{1,5})([A-Za-z]{1,3})", re.IGNORECASE)
+
+
+def extract_canonical_piece(piece: Any) -> str:
+    """
+    Extract the valid piece code from OCR/master text.
+
+    Format: optional leading '-' (due piece), then 1–5 digits + 1–3 letters.
+    Anything after the letter run is dropped (trailing digits or digit+letter junk).
+    """
     s = _strip_tp(str(piece or "").strip())
-    s = s.lstrip("-").strip()
-    s = re.sub(r"-\d+$", "", s)
-    s = s.rstrip("-").strip()
-    return s.upper()
+    if not s:
+        return ""
+    due = s.startswith("-")
+    body = s.lstrip("-+").strip()
+    m = _PIECE_BODY_RE.match(body)
+    if not m:
+        return ""
+    core = f"{m.group(1)}{m.group(2).upper()}"
+    return f"-{core}" if due else core
+
+
+def is_valid_piece_format(piece: Any) -> bool:
+    """True when piece contains a canonical digit+letter body."""
+    return bool(extract_canonical_piece(piece))
+
+
+def normalize_piece_key(piece: Any) -> str:
+    s = extract_canonical_piece(piece)
+    if not s:
+        return ""
+    return s.lstrip("-+").strip().upper()
 
 
 def piece_display(piece: Any) -> str:
-    """Display/export form: keep leading '-' and TP exactly as in the master Excel."""
+    """Display/export form: canonical piece; keep leading '-' when present."""
+    s = extract_canonical_piece(piece)
+    if s:
+        return s
     return str(piece or "").strip()
 
 

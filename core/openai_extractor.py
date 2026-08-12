@@ -130,6 +130,8 @@ Line items — one JSON object per fabric PIECE row:
 
 Column meaning (CRITICAL):
   piece_no <- Piece No codes: 4703T, 4736ZA, 3488A, -3956ZQ, 276H-TP
+  Piece format: optional leading '-', then 1–5 digits + 1–3 letters ONLY (must end on a letter).
+  Drop OCR noise after letters (3052A1 → 3052A; 4002ZC1B → 4002ZC). Never output trailing digits.
   table_challan_no <- Grey Challan / per-row source challan (e.g. 1350, 1351, 1104, 981)
                      NOT header Job Challan No. NOT piece codes. NOT Beam No.
   quality <- Quality No. / Quality Name block on the LEFT
@@ -252,11 +254,16 @@ def extract_from_images(
 
 
 def _looks_like_piece_code(value) -> bool:
-    """True for codes like 3487N, 3487ZG, -3956ZQ (not pure job numbers)."""
-    s = str(value or "").strip()
-    if not s or s.lower() == "nan":
-        return False
-    return bool(re.match(r"^-?\d+[A-Za-z][A-Za-z0-9]*$", s, flags=re.IGNORECASE))
+    """True for canonical piece codes (1–5 digits + 1–3 letters, ends on letter)."""
+    from core.dye_master import is_valid_piece_format
+
+    return is_valid_piece_format(value)
+
+
+def _canonicalize_piece(value) -> str:
+    from core.dye_master import extract_canonical_piece
+
+    return extract_canonical_piece(value) or ""
 
 
 def _looks_like_job_number(value) -> bool:
@@ -352,6 +359,9 @@ def _normalize_challan_item_row(row: dict, *, fallback_s_no: int | None = None) 
             s_no_s = str(fallback_s_no)
         else:
             return None
+
+    if piece_s:
+        piece_s = _canonicalize_piece(piece_s)
 
     return {
         "s_no": s_no_s,
